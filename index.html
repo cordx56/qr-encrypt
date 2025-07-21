@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>qr-encrypt</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        line-height: 1.6;
+        color: #333;
+        background-color: #f5f5f5;
+      }
+
+      .app {
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: white;
+        min-height: 100vh;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      }
+
+      h1 {
+        text-align: center;
+        color: #2c3e50;
+        margin-bottom: 30px;
+        font-size: 2rem;
+      }
+
+      h2 {
+        color: #34495e;
+        margin-bottom: 15px;
+        font-size: 1.5rem;
+      }
+
+      h3 {
+        color: #34495e;
+        margin-bottom: 10px;
+        font-size: 1.2rem;
+      }
+
+      .loading {
+        text-align: center;
+        padding: 50px;
+        color: #7f8c8d;
+        font-size: 1.1rem;
+      }
+
+      .main-view {
+        display: flex;
+        flex-direction: column;
+        gap: 30px;
+      }
+
+      .my-qr-section {
+        text-align: center;
+        padding: 20px;
+        border: 2px solid #ecf0f1;
+        border-radius: 10px;
+        background-color: #fafafa;
+      }
+
+      .qr-code {
+        margin: 20px 0;
+        display: flex;
+        justify-content: center;
+        padding: 0 10px; /* 左右に余白を追加 */
+      }
+
+      #qr-canvas,
+      #encrypted-qr-canvas {
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        background-color: white;
+      }
+
+      /* 小さな画面でのQRコードサイズ調整 */
+      @media (max-width: 480px) {
+        #qr-canvas {
+          max-width: 180px;
+          max-height: 180px;
+        }
+
+        #encrypted-qr-canvas {
+          max-width: 250px;
+          max-height: 250px;
+        }
+      }
+
+      @media (max-width: 360px) {
+        #qr-canvas {
+          max-width: 150px;
+          max-height: 150px;
+        }
+
+        #encrypted-qr-canvas {
+          max-width: 200px;
+          max-height: 200px;
+        }
+      }
+
+      .actions {
+        text-align: center;
+      }
+
+      .read-qr-btn {
+        background-color: #3498db;
+        color: white;
+        border: none;
+        cursor: pointer;
+      }
+
+      .contacts {
+        border: 2px solid #ecf0f1;
+        border-radius: 10px;
+        padding: 20px;
+        background-color: #fafafa;
+      }
+
+      .contacts ul {
+        list-style: none;
+      }
+
+      .contacts li {
+        padding: 10px;
+        margin: 5px 0;
+        background-color: white;
+        border-radius: 5px;
+        border: 1px solid #e0e0e0;
+      }
+
+      .contact-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 15px !important;
+        transition:
+          background-color 0.2s ease,
+          box-shadow 0.2s ease;
+      }
+
+      .contact-item:hover {
+        background-color: #f8f9fa !important;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+
+      .contact-name {
+        font-weight: 500;
+        color: #2c3e50;
+        flex-grow: 1;
+      }
+
+      .delete-contact-btn {
+        background-color: #e74c3c !important;
+        color: white !important;
+        border: none !important;
+        padding: 6px 12px !important;
+        border-radius: 4px !important;
+        cursor: pointer !important;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        transition:
+          background-color 0.2s ease,
+          transform 0.1s ease !important;
+      }
+
+      .delete-contact-btn:hover {
+        background-color: #c0392b !important;
+        transform: translateY(-1px);
+      }
+
+      .delete-contact-btn:active {
+        transform: translateY(0px);
+      }
+
+      .qr-reader-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .qr-reader {
+        background-color: white;
+        padding: 20px;
+        border-radius: 10px;
+        max-width: 500px;
+        width: 90%;
+        max-height: 90vh;
+        overflow-y: auto;
+        text-align: center;
+      }
+
+      .qr-reader video {
+        width: 100%;
+        max-width: 300px;
+        height: auto;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        margin: 10px 0;
+      }
+
+      .manual-input-section {
+        margin-top: 20px;
+        padding-top: 20px;
+        border-top: 1px solid #ddd;
+        text-align: left;
+      }
+
+      .manual-input-section h4 {
+        margin-bottom: 15px;
+        color: #34495e;
+        text-align: center;
+      }
+
+      .input-group {
+        margin-bottom: 15px;
+      }
+
+      .input-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 500;
+        color: #2c3e50;
+      }
+
+      .input-row {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+
+      .input-row input,
+      .input-row textarea {
+        flex: 1;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: inherit;
+      }
+
+      .input-row textarea {
+        resize: vertical;
+        min-height: 80px;
+      }
+
+      .input-btn {
+        background-color: #3498db;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+        font-size: 14px;
+        transition: background-color 0.2s ease;
+      }
+
+      .input-btn:hover {
+        background-color: #2980b9;
+      }
+
+      .input-btn.decrypt {
+        background-color: #27ae60;
+        align-self: flex-start;
+      }
+
+      .input-btn.decrypt:hover {
+        background-color: #229954;
+      }
+
+      .textarea-container {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .dialog-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.5);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+      }
+
+      .dialog {
+        background-color: white;
+        padding: 30px;
+        border-radius: 10px;
+        text-align: center;
+        max-width: 400px;
+        width: 90%;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+      }
+
+      .dialog p {
+        margin-bottom: 20px;
+        line-height: 1.6;
+        color: #34495e;
+      }
+
+      button {
+        background-color: #95a5a6;
+        color: white;
+        border: none;
+        margin: 5px;
+        padding: 15px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .send-message-btn {
+        background-color: #27ae60;
+        color: white;
+        border: none;
+        padding: 15px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .copy-key-btn {
+        background-color: #3498db;
+        color: white;
+        border: none;
+        padding: 15px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .copy-key-btn:hover {
+        background-color: #2980b9;
+      }
+
+      .encrypted-dialog-buttons {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+      }
+
+      .copy-encrypted-btn {
+        flex: 1;
+        background-color: #3498db;
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .copy-encrypted-btn:hover {
+        background-color: #2980b9;
+      }
+
+      .close-dialog-btn {
+        flex: 1;
+        background-color: #95a5a6;
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .close-dialog-btn:hover {
+        background-color: #7f8c8d;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: center;
+        margin: 20px 0;
+      }
+
+      @media (max-width: 600px) {
+        .app {
+          padding: 15px;
+        }
+
+        h1 {
+          font-size: 1.5rem;
+        }
+
+        .actions {
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .actions button {
+          width: 100%;
+          max-width: 280px;
+        }
+
+        .encrypted-dialog-buttons {
+          flex-direction: column;
+        }
+
+        .encrypted-dialog-buttons button {
+          width: 100%;
+        }
+      }
+
+      /* ローディング画面のスタイル */
+      .loading-screen {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 60vh;
+        padding: 40px 20px;
+        text-align: center;
+      }
+
+      .loading-content {
+        max-width: 400px;
+        width: 100%;
+      }
+
+      .loading-icon {
+        margin-bottom: 20px;
+      }
+
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid #ecf0f1;
+        border-top: 3px solid #3498db;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto;
+      }
+
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      .loading-title {
+        color: #2c3e50;
+        margin-bottom: 15px;
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+
+      .loading-message {
+        color: #34495e;
+        margin-bottom: 25px;
+        font-size: 1rem;
+        min-height: 24px;
+      }
+
+      .progress-container {
+        margin-bottom: 20px;
+      }
+
+      .progress-bar {
+        width: 100%;
+        height: 8px;
+        background-color: #ecf0f1;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 8px;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background-color: #3498db;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+      }
+
+      .progress-text {
+        font-size: 0.9rem;
+        color: #7f8c8d;
+        font-weight: 500;
+      }
+
+      .loading-tips {
+        margin-top: 25px;
+        padding: 15px;
+        background-color: #f8f9fa;
+        border-radius: 6px;
+        border-left: 3px solid #3498db;
+      }
+
+      .loading-tips p {
+        margin: 5px 0;
+        line-height: 1.4;
+        color: #7f8c8d;
+        font-size: 0.9em;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+    <script type="module">
+      console.log("🚀 Application started");
+
+      let qrVideoStream = null;
+      let qrAnimationId = null;
+
+      window.startQrReader = function startQrReader() {
+        console.log("📷 QR code reader starting...");
+
+        waitForElement("qr-video", (video) => {
+          navigator.mediaDevices
+            .getUserMedia({ video: { facingMode: "environment" } })
+            .then((stream) => {
+              video.srcObject = stream;
+              video.play();
+
+              const scan = () => {
+                const canvas = document.createElement("canvas");
+                const context = canvas.getContext("2d");
+
+                if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                  canvas.height = video.videoHeight;
+                  canvas.width = video.videoWidth;
+                  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                  const imageData = context.getImageData(
+                    0,
+                    0,
+                    canvas.width,
+                    canvas.height,
+                  );
+                  const code = jsQR(
+                    imageData.data,
+                    imageData.width,
+                    imageData.height,
+                  );
+
+                  if (code) {
+                    console.log("🎯 QR detected:", code.data);
+                    processQrCode(code.data);
+                    stopQrReader();
+                    return;
+                  }
+                }
+
+                requestAnimationFrame(scan);
+              };
+
+              requestAnimationFrame(scan);
+            })
+            .catch((err) => {
+              console.error("❌ Camera access error:", err);
+              alert("Camera access failed. Please allow camera access.");
+            });
+        });
+      };
+
+      window.stopQrReader = function stopQrReader() {
+        console.log("📷 QR code reader stopping...");
+
+        const video = document.getElementById("qr-video");
+        if (video && video.srcObject) {
+          const tracks = video.srcObject.getTracks();
+          tracks.forEach((track) => track.stop());
+          video.srcObject = null;
+          console.log("✅ Camera stopped");
+        }
+      };
+
+      window.processQrData = function (data) {
+        console.log("🔄 Processing data:", data.substring(0, 50) + "...");
+        console.log("📊 Data length:", data.length);
+        console.log("🔍 Data preview:", data.substring(0, 50) + "...");
+
+        if (
+          data.startsWith("-----BEGIN PUBLIC KEY-----") ||
+          data.includes("PUBLIC")
+        ) {
+          console.log("🔑 PEM format public key recognized");
+          const name = prompt("Please enter the name of this public key:");
+          if (name) {
+            dispatchCustomEvent("add_contact", JSON.stringify([name, data]));
+          }
+        } else if (isValidRsaPublicKey(data)) {
+          console.log("🔑 Base64 RSA public key recognized");
+          const name = prompt("Please enter the name of this public key:");
+          if (name) {
+            dispatchCustomEvent("add_contact", JSON.stringify([name, data]));
+          }
+        } else if (isBase64(data) && data.length > 50 && data.length < 2000) {
+          console.log("🔓 Encrypted message recognized");
+          dispatchCustomEvent("decrypt_message", data);
+        } else {
+          console.log("📄 Other data recognized");
+          dispatchCustomEvent("show_dialog", "Read data: " + data);
+        }
+      };
+
+      function processQrCode(data) {
+        console.log("📷 QR code read:", data);
+        window.processQrData(data);
+      }
+
+      function isValidRsaPublicKey(data) {
+        try {
+          if (!isBase64(data)) return false;
+
+          if (data.length < 300 || data.length > 600) return false;
+
+          const binaryString = atob(data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          if (bytes.length < 250) return false;
+
+          if (bytes[0] !== 0x30) return false;
+
+          console.log("✅ RSA public key characteristics confirmed:", {
+            length: data.length,
+            firstByte: "0x" + bytes[0].toString(16),
+            isValidStructure: true,
+          });
+
+          return true;
+        } catch (error) {
+          console.log("❌ RSA public key verification error:", error);
+          return false;
+        }
+      }
+
+      window.dispatchCustomEvent = function dispatchCustomEvent(
+        eventType,
+        data,
+      ) {
+        console.log("📨 CustomEvent dispatched:", eventType);
+        const detail = JSON.stringify([eventType, data]);
+        const event = new CustomEvent("qr_app_event", { detail: detail });
+        document.dispatchEvent(event);
+      };
+
+      function isBase64(str) {
+        try {
+          return btoa(atob(str)) === str;
+        } catch (err) {
+          return false;
+        }
+      }
+
+      function waitForElement(id, callback) {
+        const element = document.getElementById(id);
+        if (element) {
+          callback(element);
+        } else {
+          setTimeout(() => waitForElement(id, callback), 100);
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", () => {
+        console.log("🚀 Application initialization started");
+
+        const loadingElement = document.getElementById("loading");
+        if (loadingElement) {
+          loadingElement.style.display = "none";
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="loading" class="loading-screen">
+      <div class="loading-content">
+        <div class="loading-icon">
+          <div class="spinner"></div>
+        </div>
+        <h2 class="loading-title">qr-encrypt</h2>
+        <p class="loading-message">loading...</p>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: 0%"></div>
+          </div>
+          <p class="progress-text">initializing...</p>
+        </div>
+        <div class="loading-tips">
+          <p>initializing application...</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
