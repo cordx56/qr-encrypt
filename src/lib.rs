@@ -1,3 +1,6 @@
+mod common;
+use common::*;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gloo::console;
 use qrcode::QrCode;
@@ -15,7 +18,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{
     window, CanvasRenderingContext2d, CustomEvent, CustomEventInit, Event, HtmlCanvasElement,
-    HtmlTextAreaElement, Storage,
+    HtmlTextAreaElement, MessageEvent, Storage, Worker,
 };
 use yew::prelude::*;
 
@@ -76,6 +79,7 @@ pub struct AppState {
     pub is_loading: bool,
     pub loading_message: String,
     pub loading_progress: Option<u8>,
+    pub worker: Option<Worker>,
 }
 
 impl Default for AppState {
@@ -94,6 +98,7 @@ impl Default for AppState {
             is_loading: true,
             loading_message: "Initializing application...".to_string(),
             loading_progress: Some(0),
+            worker: None,
         }
     }
 }
@@ -126,6 +131,7 @@ impl Component for App {
                 is_loading: true,
                 loading_message: "Initializing...".to_string(),
                 loading_progress: Some(0),
+                worker: None,
             },
         }
     }
@@ -479,6 +485,68 @@ impl App {
     fn initialize_app(&mut self, ctx: &Context<Self>) {
         console::log!("🔧 Application initialization started");
         let link = ctx.link().clone();
+        let link_for_closure = link.clone();
+
+        let worker = Worker::new("./worker_loader.js").unwrap();
+        let onmessage =
+            Closure::wrap(Box::new(
+                move |event: MessageEvent| match serde_wasm_bindgen::from_value::<WorkerMessage>(
+                    event.data(),
+                ) {
+                    Ok(WorkerMessage::Generated {
+                        public_key,
+                        private_key,
+                    }) => {
+                        web_sys::console::log_2(&"Received from worker:".into(), &event.data());
+                        console::log!("✅ RSA key generation completed");
+
+                        let link_clone = link_for_closure.clone();
+                        let public_key_clone = public_key.clone();
+                        spawn_local(async move {
+                            link_clone.send_message(Msg::UpdateLoadingProgress(
+                                "Saving keys...".to_string(),
+                                Some(85),
+                            ));
+                            delay_with_message(600).await;
+
+                            save_my_keys(&private_key, &public_key).await;
+                            console::log!("✅ Keys saved successfully");
+
+                            let keys = KeyPair {
+                                public_key: public_key.clone(),
+                                private_key,
+                            };
+
+                            let contacts = HashMap::new();
+                            link_clone.send_message(Msg::UpdateLoadingProgress(
+                                "Application ready".to_string(),
+                                Some(100),
+                            ));
+                            delay_with_message(800).await;
+
+                            link_clone.send_message(Msg::SetLoading(false));
+                            link_clone.send_message(Msg::KeysLoaded(keys, contacts));
+
+                            link_clone.send_message(Msg::DrawQrCode(public_key_clone));
+                        });
+                    }
+                    Err(e) => {
+                        console::error!(&format!("❌ Key generation error: {:?}", e));
+                        let link_clone = link_for_closure.clone();
+                        spawn_local(async move {
+                            link_clone.send_message(Msg::UpdateLoadingProgress(
+                                "Key generation failed".to_string(),
+                                Some(0),
+                            ));
+                            delay_with_message(2000).await;
+                            link_clone.send_message(Msg::SetLoading(false));
+                        });
+                    }
+                },
+            ) as Box<dyn FnMut(_)>);
+        worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        onmessage.forget();
+        self.state.worker = Some(worker);
 
         ctx.link().send_message(Msg::UpdateLoadingProgress(
             "Checking saved keys...".to_string(),
@@ -535,6 +603,7 @@ impl App {
             Some(40),
         ));
 
+        let worker = self.state.worker.clone().unwrap();
         spawn_local(async move {
             delay_with_message(400).await;
 
@@ -544,46 +613,7 @@ impl App {
             ));
             delay_with_message(300).await;
 
-            match generate_key_pair_with_progress(link.clone()).await {
-                Ok((public_key, private_key)) => {
-                    console::log!("✅ RSA key generation completed");
-
-                    link.send_message(Msg::UpdateLoadingProgress(
-                        "Saving keys...".to_string(),
-                        Some(85),
-                    ));
-                    delay_with_message(600).await;
-
-                    save_my_keys(&private_key, &public_key).await;
-                    console::log!("✅ Keys saved successfully");
-
-                    let keys = KeyPair {
-                        public_key: public_key.clone(),
-                        private_key,
-                    };
-
-                    let contacts = HashMap::new();
-                    link.send_message(Msg::UpdateLoadingProgress(
-                        "Application ready".to_string(),
-                        Some(100),
-                    ));
-                    delay_with_message(800).await;
-
-                    link.send_message(Msg::SetLoading(false));
-                    link.send_message(Msg::KeysLoaded(keys, contacts));
-
-                    link.send_message(Msg::DrawQrCode(public_key));
-                }
-                Err(e) => {
-                    console::error!(&format!("❌ Key generation error: {:?}", e));
-                    link.send_message(Msg::UpdateLoadingProgress(
-                        "Key generation failed".to_string(),
-                        Some(0),
-                    ));
-                    delay_with_message(2000).await;
-                    link.send_message(Msg::SetLoading(false));
-                }
-            }
+            worker.post_message(&js_sys::Object::new()).unwrap();
         });
     }
 
@@ -1018,17 +1048,6 @@ async fn generate_key_pair_with_progress(
     delay_with_message(500).await;
 
     Ok((public_key_str, private_key_str))
-}
-
-async fn delay_with_message(duration_ms: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        if let Some(window) = window() {
-            let _ =
-                window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, duration_ms);
-        }
-    });
-
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 async fn decrypt_message(

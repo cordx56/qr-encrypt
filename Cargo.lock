@@ -1069,6 +1069,7 @@ dependencies = [
  "rand",
  "rsa",
  "serde",
+ "serde-wasm-bindgen 0.6.5",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
