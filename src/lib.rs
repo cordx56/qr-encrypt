@@ -466,6 +466,10 @@ impl Component for App {
                         { self.render_dialog(ctx, message) }
                     }
                 }
+
+                <p style="text-align: center; margin-top: 20px;">
+                    <a href="https://github.com/cordx56/qr-encrypt">{"GitHub repository"}</a>
+                </p>
             </div>
         }
     }
