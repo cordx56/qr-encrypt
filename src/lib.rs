@@ -315,6 +315,9 @@ impl Component for App {
                 console::log!("📨 HandleCustomEvent message received");
                 console::log!(&format!("🎯 Custom event: {}", event_type));
                 match event_type.as_str() {
+                    "process_qr_data" => {
+                        process_qr_data(&data);
+                    }
                     "add_contact" => {
                         ctx.link().send_message(Msg::ShowAddContactDialog(data));
                         ctx.link().send_message(Msg::HideQrReader);
@@ -1097,10 +1100,21 @@ impl App {
                             <p style="margin: 10px 0; color: #27ae60; font-size: 14px;">
                                 {"📷 Camera is active - point QR code to camera"}
                             </p>
-                            <video id="qr-video" autoplay=true></video>
+                            <div style="position: relative; display: inline-block; margin: 10px 0;">
+                                <video id="qr-video" autoplay=true style="border: 2px solid #27ae60; border-radius: 8px;"></video>
+                                <div id="scan-overlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 200px; height: 200px; border: 2px solid #27ae60; border-radius: 4px; pointer-events: none; background: rgba(39, 174, 96, 0.1);">
+                                    <div style="position: absolute; top: -2px; left: -2px; width: 20px; height: 20px; border-top: 4px solid #27ae60; border-left: 4px solid #27ae60;"></div>
+                                    <div style="position: absolute; top: -2px; right: -2px; width: 20px; height: 20px; border-top: 4px solid #27ae60; border-right: 4px solid #27ae60;"></div>
+                                    <div style="position: absolute; bottom: -2px; left: -2px; width: 20px; height: 20px; border-bottom: 4px solid #27ae60; border-left: 4px solid #27ae60;"></div>
+                                    <div style="position: absolute; bottom: -2px; right: -2px; width: 20px; height: 20px; border-bottom: 4px solid #27ae60; border-right: 4px solid #27ae60;"></div>
+                                </div>
+                            </div>
                             <div style="margin: 10px 0; text-align: center;">
-                                <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 10px;">
-                                    {"Scanning for QR codes..."}
+                                <p id="scan-status" style="font-size: 14px; color: #27ae60; margin-bottom: 10px; font-weight: 500;">
+                                    {"🔍 Scanning for QR codes..."}
+                                </p>
+                                <p style="font-size: 12px; color: #7f8c8d;">
+                                    {"Hold the QR code steady in the green frame"}
                                 </p>
                             </div>
                         </div>

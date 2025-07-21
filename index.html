@@ -531,59 +531,135 @@
     <script type="module">
       console.log("🚀 Application started");
 
+      let scanningActive = false;
+      let scanInterval = null;
+
       window.startQrReader = function startQrReader() {
         console.log("📷 QR code reader starting...");
+        scanningActive = true;
 
         waitForElement("qr-video", (video) => {
           navigator.mediaDevices
-            .getUserMedia({ video: { facingMode: "environment" } })
+            .getUserMedia({
+              video: {
+                facingMode: "environment",
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+              },
+            })
             .then((stream) => {
               video.srcObject = stream;
               video.play();
 
-              const scan = () => {
-                const canvas = document.createElement("canvas");
-                const context = canvas.getContext("2d");
+              // Wait for video to be ready
+              video.addEventListener("loadedmetadata", () => {
+                console.log("📹 Video metadata loaded, starting scan");
 
-                if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                  canvas.height = video.videoHeight;
-                  canvas.width = video.videoWidth;
-                  context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-                  const imageData = context.getImageData(
-                    0,
-                    0,
-                    canvas.width,
-                    canvas.height,
-                  );
-                  const code = jsQR(
-                    imageData.data,
-                    imageData.width,
-                    imageData.height,
-                  );
-
-                  if (code) {
-                    console.log("🎯 QR detected:", code.data);
-                    processQrCode(code.data);
-                    stopQrReader();
-                    return;
-                  }
+                // Update scan status
+                const statusElement = document.getElementById("scan-status");
+                if (statusElement) {
+                  statusElement.textContent = "🔍 Scanning for QR codes...";
+                  statusElement.style.color = "#27ae60";
                 }
 
-                requestAnimationFrame(scan);
-              };
+                const scan = () => {
+                  if (!scanningActive) {
+                    console.log("🛑 Scanning stopped");
+                    return;
+                  }
 
-              requestAnimationFrame(scan);
+                  try {
+                    if (
+                      video.readyState === video.HAVE_ENOUGH_DATA &&
+                      video.videoWidth > 0 &&
+                      video.videoHeight > 0
+                    ) {
+                      const canvas = document.createElement("canvas");
+                      const context = canvas.getContext("2d");
+
+                      canvas.width = video.videoWidth;
+                      canvas.height = video.videoHeight;
+
+                      context.drawImage(
+                        video,
+                        0,
+                        0,
+                        canvas.width,
+                        canvas.height,
+                      );
+
+                      const imageData = context.getImageData(
+                        0,
+                        0,
+                        canvas.width,
+                        canvas.height,
+                      );
+
+                      const code = jsQR(
+                        imageData.data,
+                        imageData.width,
+                        imageData.height,
+                        {
+                          inversionAttempts: "dontInvert",
+                        },
+                      );
+
+                      if (code && code.data) {
+                        console.log("🎯 QR detected:", code.data);
+
+                        // Update status to show detection
+                        const statusElement =
+                          document.getElementById("scan-status");
+                        if (statusElement) {
+                          statusElement.textContent = "✅ QR code detected!";
+                          statusElement.style.color = "#27ae60";
+                        }
+
+                        scanningActive = false;
+                        processQrCode(code.data);
+                        stopQrReader();
+                        return;
+                      }
+                    }
+                  } catch (error) {
+                    console.error("❌ Scan error:", error);
+                  }
+
+                  // Scan every 100ms instead of every frame for better performance
+                  if (scanningActive) {
+                    setTimeout(scan, 100);
+                  }
+                };
+
+                // Start scanning after a short delay
+                setTimeout(scan, 500);
+              });
+
+              video.addEventListener("error", (e) => {
+                console.error("❌ Video error:", e);
+                alert("Video playback error occurred.");
+              });
             })
             .catch((err) => {
               console.error("❌ Camera access error:", err);
-              alert("Camera access failed. Please allow camera access.");
+              scanningActive = false;
+              alert(
+                "Camera access failed. Please allow camera access and try again.",
+              );
             });
         });
       };
 
       window.stopQrReader = function stopQrReader() {
         console.log("📷 QR code reader stopping...");
+
+        // Stop scanning
+        scanningActive = false;
+
+        if (scanInterval) {
+          clearInterval(scanInterval);
+          scanInterval = null;
+        }
 
         const video = document.getElementById("qr-video");
         if (video && video.srcObject) {
@@ -596,7 +672,7 @@
 
       function processQrCode(data) {
         console.log("📷 QR code read:", data);
-        window.process_qr_data(data);
+        window.dispatchCustomEvent("process_qr_data", data);
       }
 
       window.dispatchCustomEvent = function dispatchCustomEvent(
