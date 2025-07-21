@@ -3,13 +3,11 @@
 mod common;
 use common::*;
 
+use age::{x25519, Decryptor, Encryptor};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gloo::console;
-use rand::rngs::OsRng;
-use rsa::pkcs1::{
-    DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
-};
-use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use secrecy::ExposeSecret;
+use std::io::{Read, Write};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
@@ -144,6 +142,116 @@ pub fn worker_main() {
                                 }
                             }
                         }
+                        MainMessage::ExportPrivateKey {
+                            recipient_public_key,
+                            private_key,
+                        } => {
+                            console::log!("🔧 Exporting private key");
+                            match encrypt_message(&recipient_public_key, &private_key) {
+                                Ok(encrypted_private_key) => {
+                                    match serde_wasm_bindgen::to_value(
+                                        &WorkerMessage::PrivateKeyExported {
+                                            encrypted_private_key,
+                                        },
+                                    ) {
+                                        Ok(message) => {
+                                            console::log!(
+                                                "🔧 Sending exported private key to main thread"
+                                            );
+                                            if let Err(e) = global_inner.post_message(&message) {
+                                                error_report(&format!(
+                                                    "❌ Error posting exported private key: {:?}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error_report(&format!(
+                                                "❌ Error serializing exported private key: {:?}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error_report(&format!(
+                                        "❌ Error exporting private key: {:?}",
+                                        e.to_string()
+                                    ));
+                                }
+                            }
+                        }
+                        MainMessage::GeneratePublicKeyFromPrivate { private_key } => {
+                            console::log!("🔧 Generating public key from private key");
+                            match generate_public_key_from_private(&private_key) {
+                                Ok(public_key) => {
+                                    match serde_wasm_bindgen::to_value(
+                                        &WorkerMessage::PublicKeyGenerated { public_key },
+                                    ) {
+                                        Ok(message) => {
+                                            console::log!(
+                                                "🔧 Sending generated public key to main thread"
+                                            );
+                                            if let Err(e) = global_inner.post_message(&message) {
+                                                error_report(&format!(
+                                                    "❌ Error posting generated public key: {:?}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error_report(&format!(
+                                                "❌ Error serializing generated public key: {:?}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error_report(&format!(
+                                        "❌ Error generating public key: {:?}",
+                                        e.to_string()
+                                    ));
+                                }
+                            }
+                        }
+                        MainMessage::ProcessQrData { data } => {
+                            console::log!("🔧 Processing QR data");
+                            match process_qr_data(&data) {
+                                Ok((event_type, event_data)) => {
+                                    match serde_wasm_bindgen::to_value(
+                                        &WorkerMessage::QrDataProcessed {
+                                            event_type,
+                                            event_data,
+                                        },
+                                    ) {
+                                        Ok(message) => {
+                                            console::log!(
+                                                "🔧 Sending processed QR data to main thread"
+                                            );
+                                            if let Err(e) = global_inner.post_message(&message) {
+                                                error_report(&format!(
+                                                    "❌ Error posting processed QR data: {:?}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error_report(&format!(
+                                                "❌ Error serializing processed QR data: {:?}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error_report(&format!(
+                                        "❌ Error processing QR data: {:?}",
+                                        e.to_string()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 });
             }
@@ -170,37 +278,36 @@ pub fn worker_main() {
 }
 
 async fn generate_key_pair_with_progress() -> Result<(String, String), Box<dyn std::error::Error>> {
-    console::log!("🔧 RSA key generation process started");
+    console::log!("🔧 X25519 key generation process started");
 
-    let mut rng = OsRng;
-    let bits = 2048;
-    let private_key = RsaPrivateKey::new(&mut rng, bits)?;
-    let public_key = RsaPublicKey::from(&private_key);
+    let identity = x25519::Identity::generate();
+    let recipient = identity.to_public();
 
-    let private_pem = private_key.to_pkcs1_der()?;
-    let public_pem = public_key.to_pkcs1_der()?;
+    // age鍵は文字列として直接出力できます
+    let private_key_str = identity.to_string().expose_secret().to_string();
+    let public_key_str = recipient.to_string();
 
-    let private_key_str = BASE64.encode(private_pem.as_bytes());
-    let public_key_str = BASE64.encode(public_pem.as_bytes());
-
-    console::log!("✅ RSA key pair successfully generated");
+    console::log!("✅ X25519 key pair successfully generated");
 
     Ok((public_key_str, private_key_str))
 }
 
 fn encrypt_message(public_key: &str, message: &str) -> Result<String, Box<dyn std::error::Error>> {
-    console::log!("🔑 Decoding public key from Base64...");
-    let public_key_bytes = BASE64.decode(public_key)?;
-
-    console::log!("🔍 Parsing RSA public key...");
-    let public_key = RsaPublicKey::from_pkcs1_der(&public_key_bytes)?;
-
-    console::log!("🎲 Generating random number...");
-    let mut rng = OsRng;
+    console::log!("🔑 Parsing X25519 public key...");
+    let recipient: x25519::Recipient = public_key.parse()?;
 
     console::log!("🔐 Encrypting message...");
-    let padding = Pkcs1v15Encrypt;
-    let encrypted = public_key.encrypt(&mut rng, padding, message.as_bytes())?;
+    let encryptor = Encryptor::with_recipients(
+        vec![Box::new(recipient) as Box<dyn age::Recipient>]
+            .iter()
+            .map(|r| r.as_ref()),
+    )
+    .expect("we provided a recipient");
+
+    let mut encrypted = vec![];
+    let mut writer = encryptor.wrap_output(&mut encrypted)?;
+    writer.write_all(message.as_bytes())?;
+    writer.finish()?;
 
     console::log!("📦 Encoding to Base64...");
     let result = BASE64.encode(&encrypted);
@@ -213,27 +320,93 @@ fn decrypt_message(
     private_key: &str,
     encrypted_message: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    console::log!("🔑 Decoding private key from Base64...");
-    let private_key_bytes = BASE64.decode(private_key)?;
-
-    console::log!("🔍 Parsing RSA private key...");
-    let private_key = RsaPrivateKey::from_pkcs1_der(&private_key_bytes)?;
+    console::log!("🔍 Parsing X25519 private key...");
+    let identity: x25519::Identity = private_key.parse()?;
 
     console::log!("📦 Decoding encrypted message from Base64...");
     let encrypted_bytes = BASE64.decode(encrypted_message)?;
 
     console::log!("🔓 Decrypting message...");
-    let decrypted = match private_key.decrypt(Pkcs1v15Encrypt, &encrypted_bytes) {
-        Ok(decrypted) => decrypted,
+    let decryptor = match Decryptor::new(&encrypted_bytes[..]) {
+        Ok(decryptor) => decryptor,
+        Err(e) => {
+            console::error!(&format!("❌ Error creating decryptor: {:?}", e));
+            return Ok(None);
+        }
+    };
+
+    let mut decrypted = vec![];
+    let mut reader = match decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity)) {
+        Ok(reader) => reader,
         Err(e) => {
             console::error!(&format!("❌ Error decrypting message: {:?}", e));
             return Ok(None);
         }
     };
 
+    if let Err(e) = reader.read_to_end(&mut decrypted) {
+        console::error!(&format!("❌ Error reading decrypted data: {:?}", e));
+        return Ok(None);
+    }
+
     console::log!("📝 Converting decrypted bytes to string...");
     let result = String::from_utf8(decrypted)?;
 
     console::log!(&format!("✅ Decryption completed: {} chars", result.len()));
     Ok(Some(result))
+}
+
+fn generate_public_key_from_private(
+    private_key: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    console::log!("🔍 Parsing X25519 private key...");
+    let identity: x25519::Identity = private_key.parse()?;
+
+    console::log!("🔑 Generating public key from private key...");
+    let recipient = identity.to_public();
+
+    let public_key_str = recipient.to_string();
+
+    console::log!("✅ Public key generation completed");
+    Ok(public_key_str)
+}
+
+fn process_qr_data(data: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    console::log!("🔄 Processing QR data");
+    console::log!(&format!("📊 Data length: {}", data.len()));
+    console::log!(&format!(
+        "🔍 Data preview: {}...",
+        &data[..data.len().min(50)]
+    ));
+
+    if is_valid_age_public_key(data) {
+        console::log!("🔑 Age public key recognized");
+        Ok(("add_contact".to_string(), data.to_string()))
+    } else if is_base64(data) && data.len() > 50 && data.len() < 2000 {
+        console::log!("🔓 Encrypted message recognized");
+        Ok(("decrypt_message".to_string(), data.to_string()))
+    } else {
+        console::log!("📄 Other data recognized");
+        Ok(("show_dialog".to_string(), format!("Read data: {}", data)))
+    }
+}
+
+fn is_valid_age_public_key(data: &str) -> bool {
+    match data.parse::<x25519::Recipient>() {
+        Ok(_) => {
+            console::log!("✅ Valid age public key verified");
+            true
+        }
+        Err(_) => {
+            console::log!("❌ Invalid age public key");
+            false
+        }
+    }
+}
+
+fn is_base64(s: &str) -> bool {
+    match BASE64.decode(s) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }

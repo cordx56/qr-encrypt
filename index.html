@@ -72,7 +72,8 @@
         margin: 20px 0;
         display: flex;
         justify-content: center;
-        padding: 0 10px; /* 左右に余白を追加 */
+        padding: 0 10px;
+        /* 左右に余白を追加 */
       }
 
       #qr-canvas,
@@ -464,6 +465,7 @@
         0% {
           transform: rotate(0deg);
         }
+
         100% {
           transform: rotate(360deg);
         }
@@ -529,9 +531,6 @@
     <script type="module">
       console.log("🚀 Application started");
 
-      let qrVideoStream = null;
-      let qrAnimationId = null;
-
       window.startQrReader = function startQrReader() {
         console.log("📷 QR code reader starting...");
 
@@ -595,67 +594,9 @@
         }
       };
 
-      window.processQrData = function (data) {
-        console.log("🔄 Processing data:", data.substring(0, 50) + "...");
-        console.log("📊 Data length:", data.length);
-        console.log("🔍 Data preview:", data.substring(0, 50) + "...");
-
-        if (
-          data.startsWith("-----BEGIN PUBLIC KEY-----") ||
-          data.includes("PUBLIC")
-        ) {
-          console.log("🔑 PEM format public key recognized");
-          const name = prompt("Please enter the name of this public key:");
-          if (name) {
-            dispatchCustomEvent("add_contact", JSON.stringify([name, data]));
-          }
-        } else if (isValidRsaPublicKey(data)) {
-          console.log("🔑 Base64 RSA public key recognized");
-          const name = prompt("Please enter the name of this public key:");
-          if (name) {
-            dispatchCustomEvent("add_contact", JSON.stringify([name, data]));
-          }
-        } else if (isBase64(data) && data.length > 50 && data.length < 2000) {
-          console.log("🔓 Encrypted message recognized");
-          dispatchCustomEvent("decrypt_message", data);
-        } else {
-          console.log("📄 Other data recognized");
-          dispatchCustomEvent("show_dialog", "Read data: " + data);
-        }
-      };
-
       function processQrCode(data) {
         console.log("📷 QR code read:", data);
-        window.processQrData(data);
-      }
-
-      function isValidRsaPublicKey(data) {
-        try {
-          if (!isBase64(data)) return false;
-
-          if (data.length < 300 || data.length > 600) return false;
-
-          const binaryString = atob(data);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-
-          if (bytes.length < 250) return false;
-
-          if (bytes[0] !== 0x30) return false;
-
-          console.log("✅ RSA public key characteristics confirmed:", {
-            length: data.length,
-            firstByte: "0x" + bytes[0].toString(16),
-            isValidStructure: true,
-          });
-
-          return true;
-        } catch (error) {
-          console.log("❌ RSA public key verification error:", error);
-          return false;
-        }
+        window.process_qr_data(data);
       }
 
       window.dispatchCustomEvent = function dispatchCustomEvent(
@@ -667,14 +608,6 @@
         const event = new CustomEvent("qr_app_event", { detail: detail });
         document.dispatchEvent(event);
       };
-
-      function isBase64(str) {
-        try {
-          return btoa(atob(str)) === str;
-        } catch (err) {
-          return false;
-        }
-      }
 
       function waitForElement(id, callback) {
         const element = document.getElementById(id);
@@ -703,6 +636,7 @@
       data-loader-shim
     />
   </head>
+
   <body>
     <div id="loading" class="loading-screen">
       <div class="loading-content">

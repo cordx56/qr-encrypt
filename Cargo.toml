@@ -37,7 +37,8 @@ web-sys = { version = "0.3", features = [
     "HtmlTextAreaElement"
 ] }
 yew = { version = "0.21", features = ["csr"] }
-rsa = { version = "0.9", features = ["std"], default-features = false }
+age = { version = "0.11", default-features = false }
+secrecy = "0.10"
 rand = { version = "0.8", features = ["getrandom"], default-features = false }
 getrandom = { version = "0.2", features = ["js"] }
 qrcode = "0.14"

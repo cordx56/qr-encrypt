@@ -1,4 +1,4 @@
-use gloo::{console, dialogs::alert};
+// use gloo::{console, dialogs::alert}; // 現在未使用
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -15,6 +15,16 @@ pub enum WorkerMessage {
     Decrypted {
         decrypted_data: String,
     },
+    PrivateKeyExported {
+        encrypted_private_key: String,
+    },
+    PublicKeyGenerated {
+        public_key: String,
+    },
+    QrDataProcessed {
+        event_type: String,
+        event_data: String,
+    },
     Error {
         message: String,
     },
@@ -24,6 +34,22 @@ pub enum WorkerMessage {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum MainMessage {
     GenerateKeyPair,
-    Encrypt { public_key: String, data: String },
-    Decrypt { private_key: String, data: String },
+    Encrypt {
+        public_key: String,
+        data: String,
+    },
+    Decrypt {
+        private_key: String,
+        data: String,
+    },
+    ExportPrivateKey {
+        recipient_public_key: String,
+        private_key: String,
+    },
+    GeneratePublicKeyFromPrivate {
+        private_key: String,
+    },
+    ProcessQrData {
+        data: String,
+    },
 }

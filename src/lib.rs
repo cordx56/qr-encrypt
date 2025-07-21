@@ -1,6 +1,7 @@
 mod common;
 use common::*;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gloo::{console, dialogs::alert};
 use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
@@ -42,13 +43,8 @@ pub enum Msg {
     ShowEncryptedQr(String),
     HideEncryptedQr,
     ShowDeleteConfirm(String),
-    HideDeleteConfirm,
-    ConfirmDelete,
     ConfirmDeleteContact(String),
     CancelDeleteContact,
-    SetDialogVisible(bool),
-    AddContact(String, String),
-    DeleteContact(String),
     DecryptMessage(String),
     ShowDialog(String),
     HideDialog,
@@ -57,6 +53,18 @@ pub enum Msg {
     HandleCustomEvent(String, String),
     CopyPublicKey,
     CopyEncryptedMessage,
+    ShowExportPrivateKeyDialog,
+    HideExportPrivateKeyDialog,
+    ExportPrivateKey(String),
+    ShowPrivateKeyImportConfirm(String),
+    HidePrivateKeyImportConfirm,
+    ConfirmImportPrivateKey,
+    CancelImportPrivateKey,
+    ImportPrivateKeyWithPublicKey(String, String),
+    ShowAddContactDialog(String),
+    HideAddContactDialog,
+    ConfirmAddContact(String),
+    CancelAddContact,
 }
 
 #[derive(Clone, PartialEq)]
@@ -76,6 +84,11 @@ pub struct AppState {
     pub loading_message: String,
     pub loading_progress: Option<u8>,
     pub worker: Option<Worker>,
+    pub export_private_key_dialog_visible: bool,
+    pub private_key_import_confirm_visible: bool,
+    pub private_key_to_import: Option<String>,
+    pub add_contact_dialog_visible: bool,
+    pub public_key_to_add: Option<String>,
 }
 
 impl Default for AppState {
@@ -96,6 +109,11 @@ impl Default for AppState {
             loading_message: "Initializing application...".to_string(),
             loading_progress: Some(0),
             worker: None,
+            export_private_key_dialog_visible: false,
+            private_key_import_confirm_visible: false,
+            private_key_to_import: None,
+            add_contact_dialog_visible: false,
+            public_key_to_add: None,
         }
     }
 }
@@ -130,6 +148,11 @@ impl Component for App {
                 loading_message: "Initializing...".to_string(),
                 loading_progress: Some(0),
                 worker: None,
+                export_private_key_dialog_visible: false,
+                private_key_import_confirm_visible: false,
+                private_key_to_import: None,
+                add_contact_dialog_visible: false,
+                public_key_to_add: None,
             },
         }
     }
@@ -158,10 +181,9 @@ impl Component for App {
             Msg::DrawQrCode(public_key) => {
                 console::log!("📨 DrawQrCode message received");
 
-                let public_key_clone = public_key.clone();
                 let closure = Closure::wrap(Box::new(move || {
                     console::log!("⏰ QR code delayed drawing started");
-                    draw_qr_code_to_canvas(&public_key_clone);
+                    draw_qr_code_to_canvas(&public_key);
                 }) as Box<dyn FnMut()>);
 
                 if let Some(window) = window() {
@@ -228,12 +250,6 @@ impl Component for App {
                 self.state.encrypted_qr_data = None;
                 true
             }
-            Msg::AddContact(name, public_key) => {
-                console::log!("📨 AddContact message received");
-                console::log!(&format!("👤 Contact added: {}", name));
-                self.add_contact(name, public_key);
-                true
-            }
             Msg::ShowDeleteConfirm(name) => {
                 console::log!("📨 ShowDeleteConfirm message received");
                 console::log!(&format!("❓ Delete confirmation displayed: {}", name));
@@ -293,11 +309,8 @@ impl Component for App {
                 console::log!(&format!("🎯 Custom event: {}", event_type));
                 match event_type.as_str() {
                     "add_contact" => {
-                        if let Ok(contact_data) = serde_json::from_str::<(String, String)>(&data) {
-                            ctx.link()
-                                .send_message(Msg::AddContact(contact_data.0, contact_data.1));
-                            ctx.link().send_message(Msg::HideQrReader);
-                        }
+                        ctx.link().send_message(Msg::ShowAddContactDialog(data));
+                        ctx.link().send_message(Msg::HideQrReader);
                     }
                     "delete_contact" => {
                         if let Ok(name) = serde_json::from_str::<String>(&data) {
@@ -379,6 +392,15 @@ impl Component for App {
                             }
                         }
                     }
+                    "public_key_generated" => {
+                        console::log!("🔑 Public key generated, completing import");
+                        if let Some(ref private_key) = self.state.private_key_to_import {
+                            ctx.link().send_message(Msg::ImportPrivateKeyWithPublicKey(
+                                private_key.clone(),
+                                data,
+                            ));
+                        }
+                    }
                     _ => {}
                 }
                 true
@@ -421,30 +443,176 @@ impl Component for App {
                 }
                 true
             }
-            Msg::DeleteContact(name) => {
-                console::log!("📨 DeleteContact message received");
-                console::log!(&format!("👤 Contact deleted: {}", name));
-                self.delete_contact(name);
+            Msg::ShowExportPrivateKeyDialog => {
+                console::log!("📨 ShowExportPrivateKeyDialog message received");
+                self.state.export_private_key_dialog_visible = true;
                 true
             }
-            Msg::HideDeleteConfirm => {
-                console::log!("📨 HideDeleteConfirm message received");
-                self.state.delete_confirm_visible = false;
-                self.state.delete_target = None;
+            Msg::HideExportPrivateKeyDialog => {
+                console::log!("📨 HideExportPrivateKeyDialog message received");
+                self.state.export_private_key_dialog_visible = false;
                 true
             }
-            Msg::ConfirmDelete => {
-                console::log!("📨 ConfirmDelete message received");
-                if let Some(ref name) = self.state.delete_target {
-                    self.delete_contact(name.clone());
+            Msg::ExportPrivateKey(recipient_name) => {
+                console::log!("📨 ExportPrivateKey message received");
+                if let Some(ref my_keys) = self.state.my_keys {
+                    if let Some(recipient_public_key) = self.state.contacts.get(&recipient_name) {
+                        if let Some(worker) = self.state.worker.clone() {
+                            match serde_wasm_bindgen::to_value(&MainMessage::ExportPrivateKey {
+                                recipient_public_key: recipient_public_key.clone(),
+                                private_key: my_keys.private_key.clone(),
+                            }) {
+                                Ok(export_message) => {
+                                    if let Err(e) = worker.post_message(&export_message) {
+                                        console::error!(&format!(
+                                            "❌ Failed to post export message: {:?}",
+                                            e
+                                        ));
+                                        ctx.link().send_message(Msg::ShowDialog(
+                                            "Failed to export private key".to_string(),
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    console::error!(&format!(
+                                        "❌ Failed to serialize export message: {:?}",
+                                        e
+                                    ));
+                                    ctx.link().send_message(Msg::ShowDialog(
+                                        "Failed to prepare export request".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        ctx.link()
+                            .send_message(Msg::ShowDialog("Contact not found".to_string()));
+                    }
+                } else {
+                    ctx.link()
+                        .send_message(Msg::ShowDialog("No private key available".to_string()));
                 }
-                self.state.delete_confirm_visible = false;
-                self.state.delete_target = None;
+                self.state.export_private_key_dialog_visible = false;
                 true
             }
-            Msg::SetDialogVisible(visible) => {
-                console::log!("📨 SetDialogVisible message received");
-                self.state.message_dialog_visible = visible;
+            Msg::ShowPrivateKeyImportConfirm(private_key) => {
+                console::log!("📨 ShowPrivateKeyImportConfirm message received");
+                self.state.private_key_to_import = Some(private_key);
+                self.state.private_key_import_confirm_visible = true;
+                true
+            }
+            Msg::HidePrivateKeyImportConfirm => {
+                console::log!("📨 HidePrivateKeyImportConfirm message received");
+                self.state.private_key_import_confirm_visible = false;
+                self.state.private_key_to_import = None;
+                true
+            }
+            Msg::ConfirmImportPrivateKey => {
+                console::log!("📨 ConfirmImportPrivateKey message received");
+                if let Some(ref private_key) = self.state.private_key_to_import {
+                    // workerに秘密鍵から公開鍵を生成するよう依頼
+                    if let Some(worker) = self.state.worker.clone() {
+                        match serde_wasm_bindgen::to_value(
+                            &MainMessage::GeneratePublicKeyFromPrivate {
+                                private_key: private_key.clone(),
+                            },
+                        ) {
+                            Ok(generate_message) => {
+                                if let Err(e) = worker.post_message(&generate_message) {
+                                    console::error!(&format!(
+                                        "❌ Failed to post generate public key message: {:?}",
+                                        e
+                                    ));
+                                    ctx.link().send_message(Msg::ShowDialog(
+                                        "Failed to generate public key".to_string(),
+                                    ));
+                                    self.state.private_key_import_confirm_visible = false;
+                                    self.state.private_key_to_import = None;
+                                }
+                            }
+                            Err(e) => {
+                                console::error!(&format!(
+                                    "❌ Failed to serialize generate public key message: {:?}",
+                                    e
+                                ));
+                                ctx.link().send_message(Msg::ShowDialog(
+                                    "Failed to prepare public key generation".to_string(),
+                                ));
+                                self.state.private_key_import_confirm_visible = false;
+                                self.state.private_key_to_import = None;
+                            }
+                        }
+                    } else {
+                        console::error!("❌ Worker not available for public key generation");
+                        ctx.link()
+                            .send_message(Msg::ShowDialog("Worker not available".to_string()));
+                        self.state.private_key_import_confirm_visible = false;
+                        self.state.private_key_to_import = None;
+                    }
+                } else {
+                    self.state.private_key_import_confirm_visible = false;
+                    self.state.private_key_to_import = None;
+                }
+                true
+            }
+            Msg::CancelImportPrivateKey => {
+                console::log!("📨 CancelImportPrivateKey message received");
+                self.state.private_key_import_confirm_visible = false;
+                self.state.private_key_to_import = None;
+                true
+            }
+            Msg::ImportPrivateKeyWithPublicKey(private_key, public_key) => {
+                console::log!("📨 ImportPrivateKeyWithPublicKey message received");
+                // 新しい鍵ペアを保存
+                let new_keys = KeyPair {
+                    private_key,
+                    public_key: public_key.clone(),
+                };
+                self.state.my_keys = Some(new_keys.clone());
+
+                // 秘密鍵インポートダイアログを閉じる
+                self.state.private_key_import_confirm_visible = false;
+                self.state.private_key_to_import = None;
+
+                // 新しい鍵ペアを保存
+                spawn_local(async move {
+                    save_my_keys(&new_keys.private_key, &new_keys.public_key).await;
+                });
+
+                // QRコードを更新
+                ctx.link().send_message(Msg::DrawQrCode(public_key));
+                ctx.link().send_message(Msg::ShowDialog(
+                    "Private key imported and saved successfully!".to_string(),
+                ));
+                true
+            }
+            Msg::ShowAddContactDialog(public_key) => {
+                console::log!("📨 ShowAddContactDialog message received");
+                self.state.public_key_to_add = Some(public_key);
+                self.state.add_contact_dialog_visible = true;
+                true
+            }
+            Msg::HideAddContactDialog => {
+                console::log!("📨 HideAddContactDialog message received");
+                self.state.add_contact_dialog_visible = false;
+                self.state.public_key_to_add = None;
+                true
+            }
+            Msg::ConfirmAddContact(name) => {
+                console::log!("📨 ConfirmAddContact message received");
+                if let Some(ref public_key) = self.state.public_key_to_add {
+                    if !name.trim().is_empty() {
+                        self.add_contact(name, public_key.clone());
+                        self.state.add_contact_dialog_visible = false;
+                        self.state.public_key_to_add = None;
+                    }
+                }
+                true
+            }
+            Msg::CancelAddContact => {
+                console::log!("📨 CancelAddContact message received");
+                self.state.add_contact_dialog_visible = false;
+                self.state.public_key_to_add = None;
                 true
             }
         }
@@ -488,6 +656,18 @@ impl Component for App {
 
                 if self.state.delete_confirm_visible && !self.state.is_loading {
                     { self.render_delete_confirm_dialog(ctx) }
+                }
+
+                if self.state.export_private_key_dialog_visible && !self.state.is_loading {
+                    { self.render_export_private_key_dialog(ctx) }
+                }
+
+                if self.state.private_key_import_confirm_visible && !self.state.is_loading {
+                    { self.render_private_key_import_confirm_dialog(ctx) }
+                }
+
+                if self.state.add_contact_dialog_visible && !self.state.is_loading {
+                    { self.render_add_contact_dialog(ctx) }
                 }
 
                 if let Some(ref message) = self.state.dialog_message {
@@ -567,7 +747,7 @@ impl App {
                     public_key,
                     private_key,
                 }) => {
-                    console::log!("✅ RSA key generation completed");
+                    console::log!("✅ X25519 key generation completed");
 
                     let public_key_clone = public_key.clone();
                     spawn_local(async move {
@@ -602,7 +782,30 @@ impl App {
                 }
                 Ok(WorkerMessage::Decrypted { decrypted_data }) => {
                     console::log!("✅ Decryption successful");
-                    dispatch_custom_event("show_dialog", &decrypted_data);
+                    // Check if the decrypted data is a private key
+                    if is_private_key_data(&decrypted_data) {
+                        console::log!("🔑 Private key detected in decrypted data");
+                        link.send_message(Msg::ShowPrivateKeyImportConfirm(decrypted_data));
+                    } else {
+                        dispatch_custom_event("show_dialog", &decrypted_data);
+                    }
+                }
+                Ok(WorkerMessage::PrivateKeyExported {
+                    encrypted_private_key,
+                }) => {
+                    console::log!("✅ Private key export successful");
+                    dispatch_custom_event("show_encrypted_qr", &encrypted_private_key);
+                }
+                Ok(WorkerMessage::PublicKeyGenerated { public_key }) => {
+                    console::log!("✅ Public key generation successful");
+                    dispatch_custom_event("public_key_generated", &public_key);
+                }
+                Ok(WorkerMessage::QrDataProcessed {
+                    event_type,
+                    event_data,
+                }) => {
+                    console::log!("✅ QR data processed successfully");
+                    dispatch_custom_event(&event_type, &event_data);
                 }
                 Ok(WorkerMessage::Error { message }) => {
                     error_report(&message);
@@ -751,6 +954,9 @@ impl App {
         console::log!("🏠 Main view rendering started");
         let on_qr_read_click = ctx.link().callback(|_| Msg::ShowQrReader);
         let on_message_send_click = ctx.link().callback(|_| Msg::ShowMessageDialog);
+        let on_export_private_key_click = ctx
+            .link()
+            .callback(|_: web_sys::MouseEvent| Msg::ShowExportPrivateKeyDialog);
 
         html! {
             <div class="main-view">
@@ -791,7 +997,7 @@ impl App {
                                 let on_delete = ctx.link().callback(move |_| Msg::ShowDeleteConfirm(name_clone.clone()));
 
                                 html! {
-                                    <li class="contact-item">
+                                   <li class="contact-item">
                                         <span class="contact-name">{name}</span>
                                         <button
                                             onclick={on_delete}
@@ -805,6 +1011,11 @@ impl App {
                             })}
                         </ul>
                     }
+                </div>
+                <div style="margin-top: 20px; text-align: center;">
+                    <button onclick={on_export_private_key_click} class="export-private-key-btn" style="margin-left: 10px; background-color: #e67e22;">
+                        {"Export Private Key"}
+                    </button>
                 </div>
             </div>
         }
@@ -853,21 +1064,17 @@ impl App {
                             <label>{"Public Key or Encrypted Message:"}</label>
                             <div class="textarea-container">
                                 <textarea id="manual-input"
-                                         placeholder="Paste public key (-----BEGIN PUBLIC KEY----- or Base64) or encrypted message here..."
+                                         placeholder="Paste public key or encrypted message here..."
                                          style="min-height: 100px;">
                                 </textarea>
                                 <button onclick={ctx.link().callback(|_| {
-                                    if let Some(_window) = window() {
-                                        if let Some(document) = _window.document() {
+                                    if let Some(window) = window() {
+                                        if let Some(document) = window.document() {
                                             if let Some(textarea) = document.get_element_by_id("manual-input") {
                                                 if let Ok(textarea_element) = textarea.dyn_into::<HtmlTextAreaElement>() {
                                                     let input_data = textarea_element.value();
                                                     if !input_data.trim().is_empty() {
-                                                        if let Some(qr_function) = js_sys::Reflect::get(&_window, &"processQrData".into()).ok() {
-                                                            if qr_function.is_function() {
-                                                                let _ = js_sys::Function::from(qr_function).call1(&_window, &JsValue::from_str(&input_data));
-                                                            }
-                                                        }
+                                                        process_qr_data(&input_data);
                                                         textarea_element.set_value("");
                                                     }
                                                 }
@@ -1000,6 +1207,121 @@ impl App {
                     <div style="display: flex; justify-content: space-between; gap: 10px; margin-top: 20px;">
                         <button onclick={on_cancel} style="background-color: #95a5a6; flex: 1;">{"Cancel"}</button>
                         <button onclick={on_confirm} style="background-color: #e74c3c; flex: 1;">{"Delete"}</button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    fn render_export_private_key_dialog(&self, ctx: &Context<Self>) -> Html {
+        let on_close = ctx.link().callback(|_| Msg::HideExportPrivateKeyDialog);
+
+        html! {
+            <div class="dialog-overlay">
+                <div class="dialog" style="max-width: 500px;">
+                    <h3>{"Export Private Key"}</h3>
+                    <p style="margin: 15px 0; color: #e74c3c; font-weight: bold;">
+                        {"⚠️ Warning: This will send your private key to the selected contact. Only do this if you trust them completely."}
+                    </p>
+                    <div style="margin: 20px 0;">
+                        <label>{"Select recipient:"}</label>
+                        <select id="export-recipient-select" style="width: 100%; padding: 8px; margin: 5px 0;">
+                            <option value="">{"Select recipient"}</option>
+                            { for self.state.contacts.iter().map(|(name, _)| {
+                                html! { <option value={name.clone()}>{name}</option> }
+                            })}
+                        </select>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <button onclick={on_close} style="background-color: #95a5a6;">{"Cancel"}</button>
+                        <button onclick={ctx.link().callback(|_| {
+                            if let Some(window) = window() {
+                                if let Some(document) = window.document() {
+                                    if let Some(select_element) = document.get_element_by_id("export-recipient-select") {
+                                        if let Ok(select_value) = js_sys::Reflect::get(&select_element, &"value".into()) {
+                                            if let Some(selected_recipient) = select_value.as_string() {
+                                                if !selected_recipient.is_empty() {
+                                                    return Msg::ExportPrivateKey(selected_recipient);
+                                                } else {
+                                                    let _ = js_sys::eval("alert('Please select a recipient.');");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Msg::HideExportPrivateKeyDialog
+                        })} style="background-color: #e67e22;">
+                            {"Export"}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    fn render_private_key_import_confirm_dialog(&self, ctx: &Context<Self>) -> Html {
+        let on_confirm = ctx.link().callback(|_| Msg::ConfirmImportPrivateKey);
+        let on_cancel = ctx.link().callback(|_| Msg::CancelImportPrivateKey);
+
+        html! {
+            <div class="dialog-overlay">
+                <div class="dialog" style="max-width: 400px;">
+                    <h3>{"Import Private Key"}</h3>
+                    <p style="margin: 15px 0;">
+                        {"You have received a private key. Do you want to import it?"}
+                    </p>
+                    <p style="margin: 15px 0; color: #e67e22; font-weight: bold;">
+                        {"⚠️ Warning: This will replace your current private key. Make sure you trust the sender."}
+                    </p>
+                    <div style="display: flex; justify-content: space-between; gap: 10px; margin-top: 20px;">
+                        <button onclick={on_cancel} style="background-color: #95a5a6; flex: 1;">{"Cancel"}</button>
+                        <button onclick={on_confirm} style="background-color: #27ae60; flex: 1;">{"Import"}</button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    fn render_add_contact_dialog(&self, ctx: &Context<Self>) -> Html {
+        let on_cancel = ctx.link().callback(|_| Msg::CancelAddContact);
+
+        html! {
+            <div class="dialog-overlay">
+                <div class="dialog" style="max-width: 400px;">
+                    <h3>{"Add Contact"}</h3>
+                    <p style="margin: 15px 0;">
+                        {"Please enter a name for this public key:"}
+                    </p>
+                    <div style="margin: 20px 0;">
+                        <input type="text"
+                               id="contact-name-input"
+                               placeholder="Enter contact name"
+                               style="width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+                               />
+                    </div>
+                    <div style="display: flex; justify-content: space-between; gap: 10px; margin-top: 20px;">
+                        <button onclick={on_cancel} style="background-color: #95a5a6; flex: 1;">{"Cancel"}</button>
+                        <button onclick={ctx.link().callback(|_| {
+                            if let Some(window) = window() {
+                                if let Some(document) = window.document() {
+                                    if let Some(input_element) = document.get_element_by_id("contact-name-input") {
+                                        if let Ok(input_value) = js_sys::Reflect::get(&input_element, &"value".into()) {
+                                            if let Some(name) = input_value.as_string() {
+                                                if !name.trim().is_empty() {
+                                                    return Msg::ConfirmAddContact(name);
+                                                } else {
+                                                    let _ = js_sys::eval("alert('Please enter a contact name.');");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Msg::HideAddContactDialog
+                        })} style="background-color: #27ae60; flex: 1;">
+                            {"Add"}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -1384,6 +1706,55 @@ fn error_report(message: &str) {
 
 fn get_local_storage() -> Option<Storage> {
     window()?.local_storage().ok()?
+}
+
+#[wasm_bindgen]
+pub fn process_qr_data(data: &str) {
+    console::log!("🔄 Wasm processing QR data");
+    console::log!(&format!("📊 Data length: {}", data.len()));
+    console::log!(&format!(
+        "🔍 Data preview: {}...",
+        &data[..data.len().min(50)]
+    ));
+
+    if is_valid_age_public_key(data) {
+        console::log!("🔑 Age public key recognized");
+        dispatch_custom_event("add_contact", &data);
+    } else if is_private_key_data(data) {
+        console::log!("🔑 Private key recognized");
+        dispatch_custom_event("add_contact", &data);
+    } else if is_base64(data) && data.len() > 50 && data.len() < 2000 {
+        console::log!("🔓 Encrypted message recognized");
+        dispatch_custom_event("decrypt_message", &data);
+    } else {
+        console::log!("📄 Other data recognized");
+        dispatch_custom_event("show_dialog", &format!("Read data: {}", data));
+    }
+}
+
+fn is_valid_age_public_key(data: &str) -> bool {
+    use age::x25519;
+    match data.parse::<x25519::Recipient>() {
+        Ok(_) => {
+            console::log!("✅ Valid age public key verified");
+            true
+        }
+        Err(_) => {
+            console::log!("❌ Invalid age public key");
+            false
+        }
+    }
+}
+
+fn is_private_key_data(data: &str) -> bool {
+    data.parse::<age::x25519::Identity>().is_ok()
+}
+
+fn is_base64(s: &str) -> bool {
+    match BASE64.decode(s) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 #[wasm_bindgen(start)]
