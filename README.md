@@ -1,49 +1,32 @@
 # qr-encrypt
 
-このアプリケーションは、Rust製のWASMを利用し、ユーザがフロントエンドのコードのみで簡単に公開鍵暗号を利用できるシステムです。
+[日本語](README.ja.md)
 
-[デモページはこちら](https://qrenc.cordx.cx)
+This application is a Rust-powered WASM system that enables users to easily utilize public key cryptography with only frontend code.
 
-## 使い方
+[Demo page available here](https://qrenc.cordx.cx)
 
-次のように使います。
+## How to Use
 
-### 共通
+Here's how to use the application:
 
-初めてアクセスする際には、自分の鍵が自動で生成されます。
-少し時間がかかるので、待ってください。
+### General
 
-### 暗号化メッセージを受け取る側
+When you first access the application, your personal keys will be automatically generated.
+This may take a moment, so please wait.
 
-事前に送信者に公開鍵を渡します。
-QRコードを用いても、コピーしたテキストを用いても構いません。
+### For Recipients (Receiving Encrypted Messages)
 
-### 暗号化メッセージを送る側
+Share your public key with the sender in advance.
+You can use either the QR code or copy the text directly.
 
-1. 事前に受信者の公開鍵を受け取っておき、わかりやすい名前をつけて保存します。
-2. 「Send Message」ボタンを押して、受信者の公開鍵を用いて暗号化します。
-3. 表示されたQRコードか、テキストをコピーしてメッセージを送ります。
+### For Senders (Sending Encrypted Messages)
 
-## セキュリティ
+1. Obtain the recipient's public key in advance and save it with a recognizable name.
+2. Click the "Send Message" button to encrypt using the recipient's public key.
+3. Send the message by sharing the displayed QR code or copying the text.
 
-このシステムはHTML、CSS、JavaScript、WebAssemblyを用いて作られています。
-サーバ上には一切データが保存されないため、生成した秘密鍵が外部に漏れる心配が少ないです。
+## Security
 
-## 仕様
-
-- ユーザが初めてルートページにアクセスすると、秘密鍵を生成し、localStorageに秘密鍵と公開鍵を格納する。
-- その後、ここにユーザの公開鍵のQRコードが表示される。
-- ユーザはルートページの「読み取り」ボタンから相手の公開鍵のQRコード、もしくは暗号化されたメッセージのQRコードを読み取ることができる。
-- 読み取ったQRコードが公開鍵なら、名前をつけるダイアログを表示し、localStorageに保存する。
-- 暗号化されたメッセージを読み取った場合、自動で復号してダイアログに表示する。
-
-### localStorageの保存形式
-
-localStorageには、それぞれのキーに対して次のように保存する。
-
-- キー: mySecretKey
-  - 秘密鍵を保存する
-- キー: myPublicKey
-  - 公開鍵を保存する
-- キー: keys
-  - 名前をキーに、値を公開鍵としてJSONを保存する。
+This system is built using HTML, CSS, JavaScript, and WebAssembly.
+Since no data is stored on the server, there's minimal risk of your generated private key being exposed externally.
