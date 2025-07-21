@@ -65,6 +65,10 @@ pub enum Msg {
     HideAddContactDialog,
     ConfirmAddContact(String),
     CancelAddContact,
+    ShowResetConfirm,
+    HideResetConfirm,
+    ConfirmReset,
+    CancelReset,
 }
 
 #[derive(Clone, PartialEq)]
@@ -89,6 +93,7 @@ pub struct AppState {
     pub private_key_to_import: Option<String>,
     pub add_contact_dialog_visible: bool,
     pub public_key_to_add: Option<String>,
+    pub reset_confirm_visible: bool,
 }
 
 impl Default for AppState {
@@ -114,6 +119,7 @@ impl Default for AppState {
             private_key_to_import: None,
             add_contact_dialog_visible: false,
             public_key_to_add: None,
+            reset_confirm_visible: false,
         }
     }
 }
@@ -153,6 +159,7 @@ impl Component for App {
                 private_key_to_import: None,
                 add_contact_dialog_visible: false,
                 public_key_to_add: None,
+                reset_confirm_visible: false,
             },
         }
     }
@@ -615,6 +622,27 @@ impl Component for App {
                 self.state.public_key_to_add = None;
                 true
             }
+            Msg::ShowResetConfirm => {
+                console::log!("📨 ShowResetConfirm message received");
+                self.state.reset_confirm_visible = true;
+                true
+            }
+            Msg::HideResetConfirm => {
+                console::log!("📨 HideResetConfirm message received");
+                self.state.reset_confirm_visible = false;
+                true
+            }
+            Msg::ConfirmReset => {
+                console::log!("📨 ConfirmReset message received");
+                self.reset_all_data();
+                self.state.reset_confirm_visible = false;
+                true
+            }
+            Msg::CancelReset => {
+                console::log!("📨 CancelReset message received");
+                self.state.reset_confirm_visible = false;
+                true
+            }
         }
     }
 
@@ -668,6 +696,10 @@ impl Component for App {
 
                 if self.state.add_contact_dialog_visible && !self.state.is_loading {
                     { self.render_add_contact_dialog(ctx) }
+                }
+
+                if self.state.reset_confirm_visible && !self.state.is_loading {
+                    { self.render_reset_confirm_dialog(ctx) }
                 }
 
                 if let Some(ref message) = self.state.dialog_message {
@@ -882,6 +914,23 @@ impl App {
         });
     }
 
+    fn reset_all_data(&mut self) {
+        console::log!("🗑️ Resetting all data");
+
+        // Clear localStorage
+        if let Some(storage) = get_local_storage() {
+            let _ = storage.remove_item("mySecretKey");
+            let _ = storage.remove_item("myPublicKey");
+            let _ = storage.remove_item("keys");
+            console::log!("✅ localStorage cleared");
+        }
+
+        // Reload the page to restart the application
+        if let Some(window) = window() {
+            let _ = window.location().reload();
+        }
+    }
+
     fn decrypt_and_show_message(&mut self, encrypted_message: String) {
         if let Some(ref keys) = self.state.my_keys {
             let private_key = keys.private_key.clone();
@@ -1015,6 +1064,9 @@ impl App {
                 <div style="margin-top: 20px; text-align: center;">
                     <button onclick={on_export_private_key_click} class="export-private-key-btn" style="margin-left: 10px; background-color: #e67e22;">
                         {"Export Private Key"}
+                    </button>
+                    <button onclick={ctx.link().callback(|_| Msg::ShowResetConfirm)} class="reset-btn" style="margin-left: 10px; background-color: #e74c3c;">
+                        {"Reset All Data"}
                     </button>
                 </div>
             </div>
@@ -1322,6 +1374,34 @@ impl App {
                         })} style="background-color: #27ae60; flex: 1;">
                             {"Add"}
                         </button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    fn render_reset_confirm_dialog(&self, ctx: &Context<Self>) -> Html {
+        let on_confirm = ctx.link().callback(|_| Msg::ConfirmReset);
+        let on_cancel = ctx.link().callback(|_| Msg::CancelReset);
+
+        html! {
+            <div class="dialog-overlay">
+                <div class="dialog" style="max-width: 400px;">
+                    <h3>{"Reset All Data"}</h3>
+                    <p style="margin: 15px 0; color: #e74c3c; font-weight: bold;">
+                        {"⚠️ Warning: This will delete all your data including:"}
+                    </p>
+                    <ul style="text-align: left; margin: 15px 0; color: #34495e;">
+                        <li>{"Your private and public keys"}</li>
+                        <li>{"All saved contacts"}</li>
+                        <li>{"All locally stored data"}</li>
+                    </ul>
+                    <p style="margin: 15px 0; color: #e74c3c;">
+                        {"This action cannot be undone. Are you sure?"}
+                    </p>
+                    <div style="display: flex; justify-content: space-between; gap: 10px; margin-top: 20px;">
+                        <button onclick={on_cancel} style="background-color: #95a5a6; flex: 1;">{"Cancel"}</button>
+                        <button onclick={on_confirm} style="background-color: #e74c3c; flex: 1;">{"Reset"}</button>
                     </div>
                 </div>
             </div>
