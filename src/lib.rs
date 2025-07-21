@@ -1,14 +1,8 @@
 mod common;
 use common::*;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use gloo::console;
+use gloo::{console, dialogs::alert};
 use qrcode::QrCode;
-use rand::rngs::OsRng;
-use rsa::pkcs1::{
-    DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
-};
-use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
@@ -42,6 +36,7 @@ pub enum Msg {
     DrawQrCode(String),
     ShowQrReader,
     HideQrReader,
+    StartCamera,
     ShowMessageDialog,
     HideMessageDialog,
     ShowEncryptedQr(String),
@@ -69,6 +64,7 @@ pub struct AppState {
     pub my_keys: Option<KeyPair>,
     pub contacts: HashMap<String, String>,
     pub qr_reader_visible: bool,
+    pub camera_started: bool,
     pub dialog_message: Option<String>,
     pub my_public_key_qr: Option<String>,
     pub message_dialog_visible: bool,
@@ -88,6 +84,7 @@ impl Default for AppState {
             my_keys: None,
             contacts: HashMap::new(),
             qr_reader_visible: false,
+            camera_started: false,
             dialog_message: None,
             my_public_key_qr: None,
             message_dialog_visible: false,
@@ -121,6 +118,7 @@ impl Component for App {
                 my_keys: None,
                 contacts: HashMap::new(),
                 qr_reader_visible: false,
+                camera_started: false,
                 dialog_message: None,
                 my_public_key_qr: None,
                 message_dialog_visible: false,
@@ -178,13 +176,19 @@ impl Component for App {
             Msg::ShowQrReader => {
                 console::log!("📨 ShowQrReader message received");
                 self.state.qr_reader_visible = true;
-
+                self.state.camera_started = false;
+                true
+            }
+            Msg::StartCamera => {
+                console::log!("📨 StartCamera message received");
+                self.state.camera_started = true;
                 start_qr_reader_js();
                 true
             }
             Msg::HideQrReader => {
                 console::log!("📨 HideQrReader message received");
                 self.state.qr_reader_visible = false;
+                self.state.camera_started = false;
                 stop_qr_reader_js();
                 true
             }
@@ -324,22 +328,41 @@ impl Component for App {
                                 // 連絡先の公開鍵を取得
                                 if let Some(public_key) = self.state.contacts.get(contact) {
                                     // 暗号化を実行
-                                    match encrypt_message_sync(public_key, message) {
-                                        Ok(encrypted) => {
-                                            console::log!("✅ Encryption successful");
-                                            ctx.link()
-                                                .send_message(Msg::ShowEncryptedQr(encrypted));
+                                    if let Some(worker) = self.state.worker.clone() {
+                                        match serde_wasm_bindgen::to_value(&MainMessage::Encrypt {
+                                            public_key: public_key.clone(),
+                                            data: message.to_string(),
+                                        }) {
+                                            Ok(encrypt_message) => {
+                                                if let Err(e) =
+                                                    worker.post_message(&encrypt_message)
+                                                {
+                                                    console::error!(&format!(
+                                                        "❌ Failed to post encrypt message: {:?}",
+                                                        e
+                                                    ));
+                                                    ctx.link().send_message(Msg::ShowDialog(
+                                                        "Failed to send encryption request"
+                                                            .to_string(),
+                                                    ));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                console::error!(&format!(
+                                                    "❌ Failed to serialize encrypt message: {:?}",
+                                                    e
+                                                ));
+                                                ctx.link().send_message(Msg::ShowDialog(
+                                                    "Failed to prepare encryption request"
+                                                        .to_string(),
+                                                ));
+                                            }
                                         }
-                                        Err(e) => {
-                                            console::error!(&format!(
-                                                "❌ Encryption error: {:?}",
-                                                e
-                                            ));
-                                            ctx.link().send_message(Msg::ShowDialog(format!(
-                                                "Encryption failed: {}",
-                                                e
-                                            )));
-                                        }
+                                    } else {
+                                        console::error!("❌ Worker not available");
+                                        ctx.link().send_message(Msg::ShowDialog(
+                                            "Worker not available".to_string(),
+                                        ));
                                     }
                                 } else {
                                     console::error!(&format!("❌ Contact {} not found", contact));
@@ -485,113 +508,120 @@ impl App {
     fn initialize_app(&mut self, ctx: &Context<Self>) {
         console::log!("🔧 Application initialization started");
         let link = ctx.link().clone();
-        let link_for_closure = link.clone();
 
-        let worker = Worker::new("./worker_loader.js").unwrap();
-        let onmessage =
-            Closure::wrap(Box::new(
-                move |event: MessageEvent| match serde_wasm_bindgen::from_value::<WorkerMessage>(
-                    event.data(),
-                ) {
-                    Ok(WorkerMessage::Generated {
-                        public_key,
-                        private_key,
-                    }) => {
-                        web_sys::console::log_2(&"Received from worker:".into(), &event.data());
-                        console::log!("✅ RSA key generation completed");
+        // ワーカー初期化のエラーハンドリングを改善
+        let worker = match Worker::new("./worker_loader.js") {
+            Ok(worker) => worker,
+            Err(e) => {
+                error_report(&format!("❌ Failed to create worker: {:?}", e));
+                return;
+            }
+        };
 
-                        let link_clone = link_for_closure.clone();
-                        let public_key_clone = public_key.clone();
-                        spawn_local(async move {
+        let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
+            let link_clone = link.clone();
+            match serde_wasm_bindgen::from_value::<WorkerMessage>(event.data()) {
+                Ok(WorkerMessage::Ready) => {
+                    console::log!("✅ Worker ready");
+                    link.send_message(Msg::UpdateLoadingProgress(
+                        "Checking saved keys...".to_string(),
+                        Some(10),
+                    ));
+
+                    spawn_local(async move {
+                        console::log!("💾 localStorage check started");
+
+                        link_clone.send_message(Msg::UpdateLoadingProgress(
+                            "Searching for keys...".to_string(),
+                            Some(20),
+                        ));
+
+                        if let Some(keys) = load_my_keys().await {
+                            console::log!("✅ Existing keys found");
+
                             link_clone.send_message(Msg::UpdateLoadingProgress(
-                                "Saving keys...".to_string(),
-                                Some(85),
+                                "Keys loaded successfully".to_string(),
+                                Some(90),
                             ));
-                            delay_with_message(600).await;
 
-                            save_my_keys(&private_key, &public_key).await;
-                            console::log!("✅ Keys saved successfully");
+                            let contacts = load_contacts().await;
 
-                            let keys = KeyPair {
-                                public_key: public_key.clone(),
-                                private_key,
-                            };
-
-                            let contacts = HashMap::new();
                             link_clone.send_message(Msg::UpdateLoadingProgress(
                                 "Application ready".to_string(),
                                 Some(100),
                             ));
-                            delay_with_message(800).await;
 
                             link_clone.send_message(Msg::SetLoading(false));
                             link_clone.send_message(Msg::KeysLoaded(keys, contacts));
-
-                            link_clone.send_message(Msg::DrawQrCode(public_key_clone));
-                        });
-                    }
-                    Err(e) => {
-                        console::error!(&format!("❌ Key generation error: {:?}", e));
-                        let link_clone = link_for_closure.clone();
-                        spawn_local(async move {
+                        } else {
+                            console::log!("⚪ No existing keys found");
                             link_clone.send_message(Msg::UpdateLoadingProgress(
-                                "Key generation failed".to_string(),
-                                Some(0),
+                                "Generating new keys...".to_string(),
+                                Some(30),
                             ));
-                            delay_with_message(2000).await;
-                            link_clone.send_message(Msg::SetLoading(false));
-                        });
-                    }
-                },
-            ) as Box<dyn FnMut(_)>);
+                            link_clone.send_message(Msg::GenerateKeys);
+                        }
+                    });
+                }
+                Ok(WorkerMessage::Generated {
+                    public_key,
+                    private_key,
+                }) => {
+                    console::log!("✅ RSA key generation completed");
+
+                    let public_key_clone = public_key.clone();
+                    spawn_local(async move {
+                        link_clone.send_message(Msg::UpdateLoadingProgress(
+                            "Saving keys...".to_string(),
+                            Some(85),
+                        ));
+
+                        save_my_keys(&private_key, &public_key).await;
+                        console::log!("✅ Keys saved successfully");
+
+                        let keys = KeyPair {
+                            public_key: public_key.clone(),
+                            private_key,
+                        };
+
+                        let contacts = HashMap::new();
+                        link_clone.send_message(Msg::UpdateLoadingProgress(
+                            "Application ready".to_string(),
+                            Some(100),
+                        ));
+
+                        link_clone.send_message(Msg::SetLoading(false));
+                        link_clone.send_message(Msg::KeysLoaded(keys, contacts));
+
+                        link_clone.send_message(Msg::DrawQrCode(public_key_clone));
+                    });
+                }
+                Ok(WorkerMessage::Encrypted { encrypted_data }) => {
+                    console::log!("✅ Encryption successful");
+                    dispatch_custom_event("show_encrypted_qr", &encrypted_data);
+                }
+                Ok(WorkerMessage::Decrypted { decrypted_data }) => {
+                    console::log!("✅ Decryption successful");
+                    dispatch_custom_event("show_dialog", &decrypted_data);
+                }
+                Ok(WorkerMessage::Error { message }) => {
+                    error_report(&message);
+                }
+                Err(e) => {
+                    error_report(&format!("❌ Key generation error: {}", e.to_string()));
+                    spawn_local(async move {
+                        link_clone.send_message(Msg::UpdateLoadingProgress(
+                            "Key generation failed".to_string(),
+                            Some(0),
+                        ));
+                        link_clone.send_message(Msg::SetLoading(false));
+                    });
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         onmessage.forget();
         self.state.worker = Some(worker);
-
-        ctx.link().send_message(Msg::UpdateLoadingProgress(
-            "Checking saved keys...".to_string(),
-            Some(10),
-        ));
-
-        spawn_local(async move {
-            console::log!("💾 localStorage check started");
-            delay_with_message(300).await;
-
-            link.send_message(Msg::UpdateLoadingProgress(
-                "Searching for keys...".to_string(),
-                Some(20),
-            ));
-            delay_with_message(500).await;
-
-            if let Some(keys) = load_my_keys().await {
-                console::log!("✅ Existing keys found");
-
-                link.send_message(Msg::UpdateLoadingProgress(
-                    "Keys loaded successfully".to_string(),
-                    Some(90),
-                ));
-                delay_with_message(400).await;
-
-                let contacts = load_contacts().await;
-
-                link.send_message(Msg::UpdateLoadingProgress(
-                    "Application ready".to_string(),
-                    Some(100),
-                ));
-                delay_with_message(500).await;
-
-                link.send_message(Msg::SetLoading(false));
-                link.send_message(Msg::KeysLoaded(keys, contacts));
-            } else {
-                console::log!("⚪ No existing keys found");
-                link.send_message(Msg::UpdateLoadingProgress(
-                    "Generating new keys...".to_string(),
-                    Some(30),
-                ));
-                delay_with_message(600).await;
-                link.send_message(Msg::GenerateKeys);
-            }
-        });
     }
 
     fn generate_new_keys(&mut self, ctx: &Context<Self>) {
@@ -603,18 +633,34 @@ impl App {
             Some(40),
         ));
 
-        let worker = self.state.worker.clone().unwrap();
-        spawn_local(async move {
-            delay_with_message(400).await;
+        if let Some(worker) = self.state.worker.clone() {
+            spawn_local(async move {
+                link.send_message(Msg::UpdateLoadingProgress(
+                    "Generating RSA key pair...".to_string(),
+                    Some(50),
+                ));
 
-            link.send_message(Msg::UpdateLoadingProgress(
-                "Generating RSA key pair...".to_string(),
-                Some(50),
-            ));
-            delay_with_message(300).await;
-
-            worker.post_message(&js_sys::Object::new()).unwrap();
-        });
+                // GenerateKeyPairメッセージを送信
+                match serde_wasm_bindgen::to_value(&MainMessage::GenerateKeyPair) {
+                    Ok(generate_message) => {
+                        if let Err(e) = worker.post_message(&generate_message) {
+                            error_report(&format!("❌ Failed to request key generation: {:?}", e));
+                            link.send_message(Msg::SetLoading(false));
+                        }
+                    }
+                    Err(e) => {
+                        error_report(&format!(
+                            "❌ Failed to serialize key generation request: {:?}",
+                            e
+                        ));
+                        link.send_message(Msg::SetLoading(false));
+                    }
+                }
+            });
+        } else {
+            error_report("❌ Worker not available for key generation");
+            ctx.link().send_message(Msg::SetLoading(false));
+        }
     }
 
     fn add_contact(&mut self, name: String, public_key: String) {
@@ -636,17 +682,32 @@ impl App {
     fn decrypt_and_show_message(&mut self, encrypted_message: String) {
         if let Some(ref keys) = self.state.my_keys {
             let private_key = keys.private_key.clone();
-            spawn_local(async move {
-                match decrypt_message(&private_key, &encrypted_message).await {
-                    Ok(decrypted) => {
-                        dispatch_custom_event("show_dialog", &decrypted);
+            if let Some(worker) = self.state.worker.clone() {
+                match serde_wasm_bindgen::to_value(&MainMessage::Decrypt {
+                    private_key,
+                    data: encrypted_message,
+                }) {
+                    Ok(decrypt_message) => {
+                        if let Err(e) = worker.post_message(&decrypt_message) {
+                            console::error!(&format!("❌ Failed to post decrypt message: {:?}", e));
+                            error_report("Failed to send decryption request");
+                        }
                     }
                     Err(e) => {
-                        console::error!(&format!("Decryption failed: {:?}", e));
-                        dispatch_custom_event("show_dialog", "Decryption failed");
+                        console::error!(&format!(
+                            "❌ Failed to serialize decrypt message: {:?}",
+                            e
+                        ));
+                        error_report("Failed to prepare decryption request");
                     }
                 }
-            });
+            } else {
+                console::error!("❌ Worker not available for decryption");
+                error_report("Worker not available for decryption");
+            }
+        } else {
+            console::error!("❌ No private key available for decryption");
+            error_report("No private key available");
         }
     }
 
@@ -751,20 +812,36 @@ impl App {
 
     fn render_qr_reader(&self, ctx: &Context<Self>) -> Html {
         let on_close = ctx.link().callback(|_| Msg::HideQrReader);
+        let on_start_camera = ctx.link().callback(|_| Msg::StartCamera);
 
         html! {
             <div class="qr-reader-overlay">
                 <div class="qr-reader">
                     <h3>{"Read QR"}</h3>
-                    <p style="margin: 10px 0; color: #27ae60; font-size: 14px;">
-                        {"📷 The camera is automatically activated..."}
-                    </p>
-                    <video id="qr-video" autoplay=true></video>
-                    <div style="margin: 10px 0; text-align: center;">
-                        <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 10px;">
-                            {"Please point the QR code to the camera"}
-                        </p>
-                    </div>
+
+                    if !self.state.camera_started {
+                        <div style="text-align: center; margin: 20px 0;">
+                            <p style="margin: 10px 0; color: #7f8c8d; font-size: 14px;">
+                                {"📷 Click to start camera"}
+                            </p>
+                            <button onclick={on_start_camera}
+                                    style="background-color: #27ae60; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 10px 0;">
+                                {"Start Camera"}
+                            </button>
+                        </div>
+                    } else {
+                        <div>
+                            <p style="margin: 10px 0; color: #27ae60; font-size: 14px;">
+                                {"📷 Camera is active - point QR code to camera"}
+                            </p>
+                            <video id="qr-video" autoplay=true></video>
+                            <div style="margin: 10px 0; text-align: center;">
+                                <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 10px;">
+                                    {"Scanning for QR codes..."}
+                                </p>
+                            </div>
+                        </div>
+                    }
 
                     <div class="manual-input-section">
                         <h4>{"Manual Input"}</h4>
@@ -1007,143 +1084,122 @@ fn stop_qr_reader_js() {
     }
 }
 
-// 暗号化関連の関数
-
-// 進行状況付き鍵生成関数
-async fn generate_key_pair_with_progress(
-    link: yew::html::Scope<App>,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
-    console::log!("🔧 RSA key generation process started");
-
-    link.send_message(Msg::UpdateLoadingProgress(
-        "Generating random numbers...".to_string(),
-        Some(60),
-    ));
-    delay_with_message(800).await;
-
-    link.send_message(Msg::UpdateLoadingProgress(
-        "Creating RSA key pair...".to_string(),
-        Some(70),
-    ));
-    delay_with_message(1200).await;
-
-    let mut rng = OsRng;
-    let bits = 2048;
-    let private_key = RsaPrivateKey::new(&mut rng, bits)?;
-    let public_key = RsaPublicKey::from(&private_key);
-
-    link.send_message(Msg::UpdateLoadingProgress(
-        "Encoding keys...".to_string(),
-        Some(80),
-    ));
-    delay_with_message(600).await;
-
-    let private_pem = private_key.to_pkcs1_der()?;
-    let public_pem = public_key.to_pkcs1_der()?;
-
-    let private_key_str = BASE64.encode(private_pem.as_bytes());
-    let public_key_str = BASE64.encode(public_pem.as_bytes());
-
-    console::log!("✅ RSA key pair successfully generated");
-    delay_with_message(500).await;
-
-    Ok((public_key_str, private_key_str))
-}
-
-async fn decrypt_message(
-    private_key: &str,
-    encrypted_message: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let private_key_bytes = BASE64.decode(private_key)?;
-    let private_key = RsaPrivateKey::from_pkcs1_der(&private_key_bytes)?;
-
-    let encrypted_bytes = BASE64.decode(encrypted_message)?;
-    let decrypted = private_key.decrypt(Pkcs1v15Encrypt, &encrypted_bytes)?;
-
-    Ok(String::from_utf8(decrypted)?)
-}
-
-// QRコード生成とCanvas描画
 fn draw_qr_code_to_canvas(data: &str) {
     console::log!("🎨 QR code drawing started");
     console::log!(&format!("📊 Data length: {}", data.len()));
     console::log!(&format!("🔍 Data preview: {}", &data[..data.len().min(50)]));
 
-    if let Some(window) = window() {
-        let document = window.document().unwrap();
+    let window = match window() {
+        Some(w) => w,
+        None => {
+            console::error!("❌ Failed to get window object");
+            return;
+        }
+    };
 
-        let canvas = document
-            .get_element_by_id("qr-canvas")
-            .unwrap()
-            .dyn_into::<HtmlCanvasElement>()
-            .unwrap();
+    let document = match window.document() {
+        Some(d) => d,
+        None => {
+            console::error!("❌ Failed to get document object");
+            return;
+        }
+    };
 
-        let viewport_width = window.inner_width().unwrap().as_f64().unwrap_or(800.0);
-        let canvas_size = if viewport_width < 360.0 {
-            300
-        } else if viewport_width < 480.0 {
-            300
-        } else {
-            300
-        };
+    let canvas_element = match document.get_element_by_id("qr-canvas") {
+        Some(el) => el,
+        None => {
+            console::error!("❌ Canvas element 'qr-canvas' not found");
+            return;
+        }
+    };
 
-        canvas.set_width(canvas_size as u32);
-        canvas.set_height(canvas_size as u32);
+    let canvas = match canvas_element.dyn_into::<HtmlCanvasElement>() {
+        Ok(c) => c,
+        Err(_) => {
+            console::error!("❌ Failed to cast element to HtmlCanvasElement");
+            return;
+        }
+    };
+
+    let viewport_width = window
+        .inner_width()
+        .map(|w| w.as_f64().unwrap_or(800.0))
+        .unwrap_or(800.0);
+    let canvas_size = if viewport_width < 360.0 {
+        300
+    } else if viewport_width < 480.0 {
+        300
+    } else {
+        300
+    };
+
+    canvas.set_width(canvas_size as u32);
+    canvas.set_height(canvas_size as u32);
+
+    console::log!(&format!(
+        "📐 Canvas size set: {}x{}",
+        canvas_size, canvas_size
+    ));
+
+    let context = match canvas.get_context("2d") {
+        Ok(Some(ctx)) => match ctx.dyn_into::<CanvasRenderingContext2d>() {
+            Ok(c) => c,
+            Err(_) => {
+                console::error!("❌ Failed to cast context to CanvasRenderingContext2d");
+                return;
+            }
+        },
+        Ok(None) => {
+            console::error!("❌ Failed to get 2D context (null)");
+            return;
+        }
+        Err(_) => {
+            console::error!("❌ Failed to get 2D context");
+            return;
+        }
+    };
+
+    if let Ok(qr_code) = QrCode::new(data) {
+        let modules = qr_code.width();
+        console::log!(&format!("⚫ QR modules: {}x{}", modules, modules));
+
+        let margin = 12.0;
+        let available_size = canvas_size as f64 - (margin * 2.0);
+        let cell_size = available_size / modules as f64;
+
+        context.set_fill_style_str("white");
+        context.fill_rect(0.0, 0.0, canvas_size as f64, canvas_size as f64);
 
         console::log!(&format!(
-            "📐 Canvas size set: {}x{}",
-            canvas_size, canvas_size
+            "🎯 Drawing parameters: cell_size={:.2}, margin={:.2}",
+            cell_size, margin
         ));
 
-        let context = canvas
-            .get_context("2d")
-            .unwrap()
-            .unwrap()
-            .dyn_into::<CanvasRenderingContext2d>()
-            .unwrap();
-
-        if let Ok(qr_code) = QrCode::new(data) {
-            let modules = qr_code.width();
-            console::log!(&format!("⚫ QR modules: {}x{}", modules, modules));
-
-            let margin = 12.0;
-            let available_size = canvas_size as f64 - (margin * 2.0);
-            let cell_size = available_size / modules as f64;
-
-            context.set_fill_style_str("white");
-            context.fill_rect(0.0, 0.0, canvas_size as f64, canvas_size as f64);
-
-            console::log!(&format!(
-                "🎯 Drawing parameters: cell_size={:.2}, margin={:.2}",
-                cell_size, margin
-            ));
-
-            context.set_fill_style_str("black");
-            for y in 0..modules {
-                for x in 0..modules {
-                    if qr_code[(x, y)] == qrcode::Color::Dark {
-                        let draw_x = margin + (x as f64 * cell_size);
-                        let draw_y = margin + (y as f64 * cell_size);
-                        context.fill_rect(draw_x, draw_y, cell_size, cell_size);
-                    }
+        context.set_fill_style_str("black");
+        for y in 0..modules {
+            for x in 0..modules {
+                if qr_code[(x, y)] == qrcode::Color::Dark {
+                    let draw_x = margin + (x as f64 * cell_size);
+                    let draw_y = margin + (y as f64 * cell_size);
+                    context.fill_rect(draw_x, draw_y, cell_size, cell_size);
                 }
             }
-
-            console::log!("✅ QR code drawing completed");
-        } else {
-            console::error!("❌ QR code generation failed");
-
-            context.set_fill_style_str("#ffebee");
-            context.fill_rect(0.0, 0.0, canvas_size as f64, canvas_size as f64);
-            context.set_fill_style_str("#c62828");
-            context.set_font("16px Arial");
-            context.set_text_align("center");
-            let _ = context.fill_text(
-                "QR code generation error",
-                canvas_size as f64 / 2.0,
-                canvas_size as f64 / 2.0,
-            );
         }
+
+        console::log!("✅ QR code drawing completed");
+    } else {
+        console::error!("❌ QR code generation failed");
+
+        context.set_fill_style_str("#ffebee");
+        context.fill_rect(0.0, 0.0, canvas_size as f64, canvas_size as f64);
+        context.set_fill_style_str("#c62828");
+        context.set_font("16px Arial");
+        context.set_text_align("center");
+        let _ = context.fill_text(
+            "QR code generation error",
+            canvas_size as f64 / 2.0,
+            canvas_size as f64 / 2.0,
+        );
     }
 }
 
@@ -1156,128 +1212,127 @@ fn draw_encrypted_qr_code_to_canvas(data: &str) {
         &data[..data.len().min(50)]
     ));
 
-    match QrCode::new(data) {
-        Ok(qr_code) => {
-            console::log!("✅ Encrypted QR code generated successfully");
-            let modules = qr_code.width();
-            console::log!(&format!(
-                "📐 Encrypted QR code size: {}x{}",
-                modules, modules
-            ));
-
-            // Canvasを取得
-            if let Some(window) = window() {
-                console::log!("🌐 Window obtained successfully");
-                if let Some(document) = window.document() {
-                    console::log!("📄 Document obtained successfully");
-                    if let Some(canvas_element) = document.get_element_by_id("encrypted-qr-canvas")
-                    {
-                        console::log!("🎯 Canvas element found");
-                        match canvas_element.dyn_into::<HtmlCanvasElement>() {
-                            Ok(canvas) => {
-                                console::log!("🖼️ Canvas type conversion successful");
-
-                                // 画面幅に応じてcanvasサイズを調整
-                                let viewport_width =
-                                    window.inner_width().unwrap().as_f64().unwrap_or(800.0);
-                                let canvas_size = if viewport_width < 360.0 {
-                                    300
-                                } else if viewport_width < 480.0 {
-                                    300
-                                } else {
-                                    300
-                                };
-
-                                canvas.set_width(canvas_size);
-                                canvas.set_height(canvas_size);
-                                console::log!(&format!(
-                                    "📐 Encrypted canvas size adjusted: {}x{}",
-                                    canvas_size, canvas_size
-                                ));
-
-                                match canvas.get_context("2d") {
-                                    Ok(Some(context)) => {
-                                        console::log!("🎨 2D context obtained successfully");
-                                        match context.dyn_into::<CanvasRenderingContext2d>() {
-                                            Ok(context) => {
-                                                console::log!(
-                                                    "✅ Encrypted CanvasRenderingContext2d obtained successfully"
-                                                );
-
-                                                // マージンを設定（角丸で欠けるのを防ぐ）
-                                                let margin = 15.0; // 15px のマージン（暗号化QRは少し大きめ）
-                                                let available_size =
-                                                    canvas_size as f64 - (margin * 2.0);
-                                                let cell_size = available_size / modules as f64;
-                                                console::log!(&format!("📏 Encrypted margin: {}px, available size: {}px, cell size: {}", margin, available_size, cell_size));
-
-                                                // 背景を白に
-                                                context.set_fill_style_str("white");
-                                                context.fill_rect(
-                                                    0.0,
-                                                    0.0,
-                                                    canvas_size as f64,
-                                                    canvas_size as f64,
-                                                );
-                                                console::log!("⚪ Encrypted background drawing completed");
-
-                                                // QRコードを描画（マージンを考慮）
-                                                context.set_fill_style_str("black");
-                                                let mut dark_modules = 0;
-                                                for y in 0..modules {
-                                                    for x in 0..modules {
-                                                        if qr_code[(x, y)] == qrcode::Color::Dark {
-                                                            dark_modules += 1;
-                                                            context.fill_rect(
-                                                                margin + (x as f64 * cell_size),
-                                                                margin + (y as f64 * cell_size),
-                                                                cell_size,
-                                                                cell_size,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                console::log!(&format!("⚫ Encrypted QR code drawing completed - dark modules: {}", dark_modules));
-                                                console::log!("🎉 Encrypted QR code drawing completed successfully!");
-                                            }
-                                            Err(e) => console::error!(&format!(
-                                                "❌ CanvasRenderingContext2d type conversion error: {:?}",
-                                                e
-                                            )),
-                                        }
-                                    }
-                                    Ok(None) => console::error!("❌ 2D context is null"),
-                                    Err(e) => console::error!(&format!(
-                                        "❌ 2D context obtaining error: {:?}",
-                                        e
-                                    )),
-                                }
-                            }
-                            Err(e) => console::error!(&format!(
-                                "❌ Canvas type conversion error: {:?}",
-                                e
-                            )),
-                        }
-                    } else {
-                        console::error!("❌ Canvas element not found! ID: encrypted-qr-canvas");
-                        // DOM内の全canvas要素を検索
-                        let canvas_list = document.query_selector_all("canvas").unwrap();
-                        console::log!(&format!(
-                            "🔍 Number of canvas elements in DOM: {}",
-                            canvas_list.length()
-                        ));
-                    }
-                } else {
-                    console::error!("❌ Document obtaining failed");
-                }
-            } else {
-                console::error!("❌ Window obtaining failed");
-            }
-        }
+    let qr_code = match QrCode::new(data) {
+        Ok(qr) => qr,
         Err(e) => {
             console::error!(&format!("❌ Encrypted QR code generation error: {:?}", e));
+            return;
+        }
+    };
+
+    console::log!("✅ Encrypted QR code generated successfully");
+    let modules = qr_code.width();
+    console::log!(&format!(
+        "📐 Encrypted QR code size: {}x{}",
+        modules, modules
+    ));
+
+    let window = match window() {
+        Some(w) => w,
+        None => {
+            console::error!("❌ Failed to get window object for encrypted QR");
+            return;
+        }
+    };
+
+    let document = match window.document() {
+        Some(d) => d,
+        None => {
+            console::error!("❌ Failed to get document object for encrypted QR");
+            return;
+        }
+    };
+
+    let canvas_element = match document.get_element_by_id("encrypted-qr-canvas") {
+        Some(el) => el,
+        None => {
+            console::error!("❌ Canvas element 'encrypted-qr-canvas' not found");
+            return;
+        }
+    };
+
+    let canvas = match canvas_element.dyn_into::<HtmlCanvasElement>() {
+        Ok(c) => c,
+        Err(_) => {
+            console::error!("❌ Failed to cast encrypted canvas element to HtmlCanvasElement");
+            return;
+        }
+    };
+
+    let viewport_width = window
+        .inner_width()
+        .map(|w| w.as_f64().unwrap_or(800.0))
+        .unwrap_or(800.0);
+    let canvas_size = if viewport_width < 360.0 {
+        300
+    } else if viewport_width < 480.0 {
+        300
+    } else {
+        300
+    };
+
+    canvas.set_width(canvas_size);
+    canvas.set_height(canvas_size);
+    console::log!(&format!(
+        "📐 Encrypted canvas size adjusted: {}x{}",
+        canvas_size, canvas_size
+    ));
+
+    let context = match canvas.get_context("2d") {
+        Ok(Some(ctx)) => match ctx.dyn_into::<CanvasRenderingContext2d>() {
+            Ok(c) => c,
+            Err(_) => {
+                console::error!("❌ Failed to cast encrypted context to CanvasRenderingContext2d");
+                return;
+            }
+        },
+        Ok(None) => {
+            console::error!("❌ Failed to get 2D context for encrypted canvas (null)");
+            return;
+        }
+        Err(_) => {
+            console::error!("❌ Failed to get 2D context for encrypted canvas");
+            return;
+        }
+    };
+
+    console::log!("🎨 2D context obtained successfully for encrypted QR");
+
+    // マージンを設定（角丸で欠けるのを防ぐ）
+    let margin = 15.0; // 15px のマージン（暗号化QRは少し大きめ）
+    let available_size = canvas_size as f64 - (margin * 2.0);
+    let cell_size = available_size / modules as f64;
+    console::log!(&format!(
+        "📏 Encrypted margin: {}px, available size: {}px, cell size: {}",
+        margin, available_size, cell_size
+    ));
+
+    // 背景を白に
+    context.set_fill_style_str("white");
+    context.fill_rect(0.0, 0.0, canvas_size as f64, canvas_size as f64);
+    console::log!("⚪ Encrypted background drawing completed");
+
+    // QRコードを描画（マージンを考慮）
+    context.set_fill_style_str("black");
+    let mut dark_modules = 0;
+    for y in 0..modules {
+        for x in 0..modules {
+            if qr_code[(x, y)] == qrcode::Color::Dark {
+                dark_modules += 1;
+                context.fill_rect(
+                    margin + (x as f64 * cell_size),
+                    margin + (y as f64 * cell_size),
+                    cell_size,
+                    cell_size,
+                );
+            }
         }
     }
+    console::log!(&format!(
+        "⚫ Encrypted QR code drawing completed - dark modules: {}",
+        dark_modules
+    ));
+    console::log!("🎉 Encrypted QR code drawing completed successfully!");
 }
 
 // localStorage関連の関数
@@ -1322,33 +1377,13 @@ async fn load_contacts() -> HashMap<String, String> {
     HashMap::new()
 }
 
-fn get_local_storage() -> Option<Storage> {
-    window()?.local_storage().ok()?
+fn error_report(message: &str) {
+    console::error!(message);
+    alert(&message);
 }
 
-// 同期版の暗号化関数
-fn encrypt_message_sync(
-    public_key: &str,
-    message: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    console::log!("🔑 Decoding public key from Base64...");
-    let public_key_bytes = BASE64.decode(public_key)?;
-
-    console::log!("🔍 Parsing RSA public key...");
-    let public_key = RsaPublicKey::from_pkcs1_der(&public_key_bytes)?;
-
-    console::log!("🎲 Generating random number...");
-    let mut rng = OsRng;
-
-    console::log!("🔐 Encrypting message...");
-    let padding = Pkcs1v15Encrypt;
-    let encrypted = public_key.encrypt(&mut rng, padding, message.as_bytes())?;
-
-    console::log!("📦 Encoding to Base64...");
-    let result = BASE64.encode(&encrypted);
-
-    console::log!(&format!("✅ Encryption completed: {} bytes", result.len()));
-    Ok(result)
+fn get_local_storage() -> Option<Storage> {
+    window()?.local_storage().ok()?
 }
 
 #[wasm_bindgen(start)]
