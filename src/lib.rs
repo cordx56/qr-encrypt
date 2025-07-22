@@ -908,14 +908,12 @@ impl Component for App {
 
                         let _connection_clone = connection.clone();
                         let ctx_link = ctx.link().clone();
-                        let my_public_key = my_keys.public_key.clone();
 
                         spawn_local(async move {
                             let mut conn = _connection_clone;
 
                             // データハンドラを設定して受信メッセージを処理
                             let ctx_link_clone = ctx_link.clone();
-                            let my_key_clone = my_public_key.clone();
                             if let Err(e) = conn.set_data_handler(move |data| {
                                 console::log!(&format!("📨 Received RTC data: {}", data));
 
@@ -1506,7 +1504,7 @@ impl App {
                         {"Send message"}
                     </button>
                     <button onclick={ctx.link().callback(|_| Msg::ShowRtcDialog)} class="rtc-connect-btn" style="margin-left: 10px; background-color: #9b59b6;">
-                        {"Establish connection"}
+                        {"Chat"}
                     </button>
                 </div>
 
@@ -1987,7 +1985,7 @@ impl App {
                 if e.key() == "Enter" && !message.trim().is_empty() {
                     Msg::SendChatMessage(message.clone())
                 } else {
-                    Msg::UpdateChatInput(message.clone()) // No-op to avoid changing state unnecessarily
+                    Msg::UpdateChatInput(message.clone())
                 }
             })
         };
