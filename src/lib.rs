@@ -1183,7 +1183,7 @@ impl Component for App {
 }
 
 impl App {
-    fn setup_worker(&mut self, ctx: &Context<Self>) -> Option<Worker> {
+    fn setup_worker(&mut self, ctx: &Context<Self>) {
         let link = ctx.link().clone();
 
         // ワーカー初期化のエラーハンドリングを改善
@@ -1191,7 +1191,7 @@ impl App {
             Ok(worker) => worker,
             Err(e) => {
                 error_report(&format!("❌ Failed to create worker: {:?}", e));
-                return None;
+                return;
             }
         };
 
@@ -1321,14 +1321,12 @@ impl App {
         }) as Box<dyn FnMut(_)>);
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         onmessage.forget();
-        Some(worker)
+        self.state.worker = Some(worker);
     }
 
     fn initialize_app(&mut self, ctx: &Context<Self>) {
         console::log!("🔧 Application initialization started");
-        if let Some(worker) = self.setup_worker(ctx) {
-            self.state.worker = Some(worker);
-        }
+        self.setup_worker(ctx);
     }
 
     fn generate_new_keys(&mut self, ctx: &Context<Self>) {
