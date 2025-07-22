@@ -34,7 +34,26 @@ web-sys = { version = "0.3", features = [
     "Worker",
     "DedicatedWorkerGlobalScope",
     "MessageEvent",
-    "HtmlTextAreaElement"
+    "HtmlTextAreaElement",
+    "RtcPeerConnection",
+    "RtcDataChannel",
+    "RtcSessionDescription",
+    "RtcIceCandidate",
+    "RtcConfiguration",
+    "RtcIceServer",
+    "RtcDataChannelInit",
+    "RtcSessionDescriptionInit",
+    "RtcIceCandidateInit",
+    "RtcOfferOptions",
+    "RtcAnswerOptions",
+    "RtcPeerConnectionIceEvent",
+    "RtcDataChannelEvent",
+    "RtcSdpType",
+    "EventTarget",
+    "Navigator",
+    "Clipboard",
+    "RtcDataChannelState",
+    "RtcIceConnectionState"
 ] }
 yew = { version = "0.21", features = ["csr"] }
 age = { version = "0.11", default-features = false }

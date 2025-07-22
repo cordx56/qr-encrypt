@@ -1,4 +1,3 @@
-// use gloo::{console, dialogs::alert}; // 現在未使用
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -52,4 +51,11 @@ pub enum MainMessage {
     ProcessQrData {
         data: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum RtcMessage {
+    PublicKey { public_key: String },
+    EncryptedData { encrypted_data: String },
 }

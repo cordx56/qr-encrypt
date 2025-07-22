@@ -1,8 +1,11 @@
 mod common;
 use common::*;
+mod rtc;
+use rtc::Connection;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gloo::{console, dialogs::alert};
+use js_sys::Date;
 use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -13,7 +16,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{
     window, CanvasRenderingContext2d, CustomEvent, CustomEventInit, Event, HtmlCanvasElement,
-    HtmlTextAreaElement, MessageEvent, Storage, Worker,
+    HtmlElement, HtmlTextAreaElement, MessageEvent, Storage, Worker,
 };
 use yew::prelude::*;
 
@@ -23,10 +26,24 @@ pub struct KeyPair {
     pub private_key: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case", tag = "signal_type")]
+pub enum RtcSignalData {
+    Offer { sdp_data: String },
+    Answer { sdp_data: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct Contact {
     pub name: String,
     pub public_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub content: String,
+    pub is_sent: bool,  // true for sent, false for received
+    pub timestamp: f64, // Use js timestamp
 }
 
 #[derive(Debug)]
@@ -69,9 +86,25 @@ pub enum Msg {
     HideResetConfirm,
     ConfirmReset,
     CancelReset,
+    // RTC関連のメッセージ
+    ShowRtcDialog,
+    HideRtcDialog,
+    StartRtcConnection,
+    ProcessRtcSignal(String),
+    RtcConnectionEstablished,
+    SendPublicKeyViaRtc,
+    ShowChatView,
+    HideChatView,
+    SendChatMessage(String),
+    UpdateChatInput(String),
+    AddChatMessage(String, bool), // content, is_sent
+    SetPeerPublicKey(String),
+    DecryptReceivedMessage(String),   // encrypted_data
+    SendEncryptedChatMessage(String), // encrypted_data
+    ClearChatHistory,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct AppState {
     pub my_keys: Option<KeyPair>,
     pub contacts: HashMap<String, String>,
@@ -94,6 +127,14 @@ pub struct AppState {
     pub add_contact_dialog_visible: bool,
     pub public_key_to_add: Option<String>,
     pub reset_confirm_visible: bool,
+    // RTC関連の状態
+    pub rtc_dialog_visible: bool,
+    pub rtc_connection: Option<Connection>,
+    pub rtc_connected: bool,
+    pub rtc_peer_public_key: Option<String>,
+    pub chat_visible: bool,
+    pub chat_input: String,
+    pub chat_messages: Vec<ChatMessage>,
 }
 
 impl Default for AppState {
@@ -120,6 +161,13 @@ impl Default for AppState {
             add_contact_dialog_visible: false,
             public_key_to_add: None,
             reset_confirm_visible: false,
+            rtc_dialog_visible: false,
+            rtc_connection: None,
+            rtc_connected: false,
+            rtc_peer_public_key: None,
+            chat_visible: false,
+            chat_input: String::new(),
+            chat_messages: Vec::new(),
         }
     }
 }
@@ -160,6 +208,13 @@ impl Component for App {
                 add_contact_dialog_visible: false,
                 public_key_to_add: None,
                 reset_confirm_visible: false,
+                rtc_dialog_visible: false,
+                rtc_connection: None,
+                rtc_connected: false,
+                rtc_peer_public_key: None,
+                chat_visible: false,
+                chat_input: String::new(),
+                chat_messages: Vec::new(),
             },
         }
     }
@@ -286,28 +341,19 @@ impl Component for App {
                 true
             }
             Msg::ShowDialog(message) => {
-                console::log!("📨 ShowDialog message received");
-                console::log!(&format!(
-                    "💬 Dialog displayed: {}",
-                    &message[..message.len().min(50)]
-                ));
                 self.state.dialog_message = Some(message);
                 true
             }
             Msg::HideDialog => {
-                console::log!("📨 HideDialog message received");
                 self.state.dialog_message = None;
                 true
             }
             Msg::UpdateLoadingProgress(message, progress) => {
-                console::log!("📨 UpdateLoadingProgress message received");
-                console::log!(&format!("💾 Loading message updated: {}", message));
                 self.state.loading_message = message;
                 self.state.loading_progress = progress;
                 true
             }
             Msg::SetLoading(is_loading) => {
-                console::log!("📨 SetLoading message received");
                 self.state.is_loading = is_loading;
                 true
             }
@@ -338,6 +384,23 @@ impl Component for App {
                     }
                     "show_encrypted_qr" => {
                         ctx.link().send_message(Msg::ShowEncryptedQr(data));
+                    }
+                    "encrypted_message_ready" => {
+                        // Check if this is for chat (RTC connection is active) or QR generation
+                        if self.state.rtc_connected && self.state.chat_visible {
+                            ctx.link().send_message(Msg::SendEncryptedChatMessage(data));
+                        } else {
+                            dispatch_custom_event("show_encrypted_qr", &data);
+                        }
+                    }
+                    "decrypted_message_ready" => {
+                        // Check if this is for chat (RTC connection is active) or other purposes
+                        if self.state.rtc_connected && self.state.chat_visible {
+                            // This is a decrypted chat message, add it to the chat
+                            ctx.link().send_message(Msg::AddChatMessage(data, false));
+                        } else {
+                            dispatch_custom_event("show_dialog", &data);
+                        }
                     }
                     "encrypt_message" => {
                         console::log!("🔐 Encrypt message request received");
@@ -411,6 +474,11 @@ impl Component for App {
                             ));
                         }
                     }
+                    "process_rtc_signal" => {
+                        console::log!("📡 RTC signal processing requested");
+                        ctx.link().send_message(Msg::ProcessRtcSignal(data));
+                        ctx.link().send_message(Msg::HideQrReader);
+                    }
                     _ => {}
                 }
                 true
@@ -419,34 +487,49 @@ impl Component for App {
                 console::log!("📨 CopyPublicKey message received");
                 if let Some(ref my_keys) = self.state.my_keys {
                     let public_key = my_keys.public_key.clone();
-                    let js_code = format!(
-                        "navigator.clipboard.writeText('{}').then(() => {{
-                            console.log('✅ Public key copied to clipboard');
-                            window.dispatchCustomEvent('show_dialog', 'Public key copied to clipboard!');
-                        }}).catch((err) => {{
-                            console.error('❌ Failed to copy public key:', err);
-                            window.dispatchCustomEvent('show_dialog', 'Failed to copy to clipboard');
-                        }});",
-                        public_key.replace("'", "\\'")
-                    );
-                    let _ = js_sys::eval(&js_code);
+                    let ctx_link = ctx.link().clone();
+
+                    spawn_local(async move {
+                        match copy_to_clipboard(&public_key).await {
+                            Ok(_) => {
+                                console::log!("✅ Public key copied to clipboard");
+                                ctx_link.send_message(Msg::ShowDialog(
+                                    "Public key copied to clipboard!".to_string(),
+                                ));
+                            }
+                            Err(_) => {
+                                console::error!("❌ Failed to copy public key");
+                                ctx_link.send_message(Msg::ShowDialog(
+                                    "Failed to copy to clipboard".to_string(),
+                                ));
+                            }
+                        }
+                    });
                 }
                 true
             }
             Msg::CopyEncryptedMessage => {
                 console::log!("📨 CopyEncryptedMessage message received");
                 if let Some(ref encrypted_data) = self.state.encrypted_qr_data {
-                    let js_code = format!(
-                        "navigator.clipboard.writeText('{}').then(() => {{
-                            console.log('✅ Encrypted message copied to clipboard');
-                            window.dispatchCustomEvent('show_dialog', 'Encrypted message copied to clipboard!');
-                        }}).catch((err) => {{
-                            console.error('❌ Failed to copy encrypted message:', err);
-                            window.dispatchCustomEvent('show_dialog', 'Failed to copy to clipboard');
-                        }});",
-                        encrypted_data.replace("'", "\\'")
-                    );
-                    let _ = js_sys::eval(&js_code);
+                    let encrypted_data_clone = encrypted_data.clone();
+                    let ctx_link = ctx.link().clone();
+
+                    spawn_local(async move {
+                        match copy_to_clipboard(&encrypted_data_clone).await {
+                            Ok(_) => {
+                                console::log!("✅ Encrypted message copied to clipboard");
+                                ctx_link.send_message(Msg::ShowDialog(
+                                    "Encrypted message copied to clipboard!".to_string(),
+                                ));
+                            }
+                            Err(_) => {
+                                console::error!("❌ Failed to copy encrypted message");
+                                ctx_link.send_message(Msg::ShowDialog(
+                                    "Failed to copy to clipboard".to_string(),
+                                ));
+                            }
+                        }
+                    });
                 } else {
                     console::error!("❌ No encrypted message to copy");
                     dispatch_custom_event("show_dialog", "No encrypted message available to copy!");
@@ -646,6 +729,382 @@ impl Component for App {
                 self.state.reset_confirm_visible = false;
                 true
             }
+            Msg::ShowRtcDialog => {
+                self.state.rtc_dialog_visible = true;
+                true
+            }
+            Msg::HideRtcDialog => {
+                self.state.rtc_dialog_visible = false;
+                true
+            }
+            Msg::StartRtcConnection => {
+                console::log!("📨 StartRtcConnection message received");
+                self.state.rtc_connected = false;
+                self.state.rtc_peer_public_key = None;
+                self.state.rtc_dialog_visible = false;
+
+                // 実際のWebRTC接続を開始
+                let connection = Connection::new();
+                let ctx_link = ctx.link().clone();
+
+                // 接続確立ハンドラを設定（ICE接続のみ）
+                let ctx_link_for_ice = ctx_link.clone();
+                let _ = connection.set_connection_established_handler(move || {
+                    console::log!("🎉 WebRTC ICE connection established!");
+                    ctx_link_for_ice.send_message(Msg::RtcConnectionEstablished);
+                });
+
+                // データチャネルオープンハンドラを設定（メッセージング準備完了）
+                let ctx_link_for_data = ctx_link.clone();
+                let _ = connection.set_data_channel_open_handler(move || {
+                    console::log!("🎉 Data channel ready! Starting public key exchange");
+                    ctx_link_for_data.send_message(Msg::SendPublicKeyViaRtc);
+                });
+
+                self.state.rtc_connection = Some(connection.clone());
+
+                spawn_local(async move {
+                    let mut conn = connection;
+                    match conn
+                        .start_connection(move |offer_sdp| {
+                            let offer_data = RtcSignalData::Offer {
+                                sdp_data: offer_sdp,
+                            };
+
+                            if let Ok(offer_json) = serde_json::to_string(&offer_data) {
+                                ctx_link.send_message(Msg::ShowEncryptedQr(offer_json));
+                            }
+                        })
+                        .await
+                    {
+                        Ok(_) => {
+                            console::log!("✅ RTC connection started successfully");
+                        }
+                        Err(e) => {
+                            console::error!(&format!("❌ Failed to start RTC connection: {:?}", e));
+                        }
+                    }
+                });
+
+                true
+            }
+            Msg::ProcessRtcSignal(sdp_data) => {
+                console::log!("📨 ProcessRtcSignal message received");
+
+                if let Ok(signal_data) = serde_json::from_str::<RtcSignalData>(&sdp_data) {
+                    console::log!("📡 Processing RTC signal");
+
+                    match signal_data {
+                        RtcSignalData::Offer { sdp_data } => {
+                            // rtc.rsの実装を使用してOfferを処理
+                            let connection = Connection::new();
+                            let ctx_link = ctx.link().clone();
+                            let offer_sdp = sdp_data.clone();
+
+                            // 接続確立ハンドラを設定（ICE接続のみ）
+                            let ctx_link_for_ice = ctx_link.clone();
+                            let _ = connection.set_connection_established_handler(move || {
+                                console::log!(
+                                    "🎉 WebRTC ICE connection established (Answer side)!"
+                                );
+                                ctx_link_for_ice.send_message(Msg::RtcConnectionEstablished);
+                            });
+
+                            // データチャネルオープンハンドラを設定（メッセージング準備完了）
+                            let ctx_link_for_data = ctx_link.clone();
+                            let _ = connection.set_data_channel_open_handler(move || {
+                                 console::log!("🎉 Data channel ready (Answer side)! Starting public key exchange");
+                                 ctx_link_for_data.send_message(Msg::SendPublicKeyViaRtc);
+                             });
+
+                            // 接続をstateに保存
+                            self.state.rtc_connection = Some(connection.clone());
+
+                            spawn_local(async move {
+                                let mut conn = connection;
+                                match conn
+                                    .recv_offer(offer_sdp, move |answer_sdp| {
+                                        let answer_data = RtcSignalData::Answer {
+                                            sdp_data: answer_sdp,
+                                        };
+
+                                        if let Ok(answer_json) = serde_json::to_string(&answer_data)
+                                        {
+                                            ctx_link
+                                                .send_message(Msg::ShowEncryptedQr(answer_json));
+                                        }
+                                    })
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        console::log!("✅ Offer processed successfully");
+                                    }
+                                    Err(e) => {
+                                        console::error!(&format!(
+                                            "❌ Failed to process offer: {:?}",
+                                            e
+                                        ));
+                                    }
+                                }
+                            });
+                        }
+                        RtcSignalData::Answer { sdp_data } => {
+                            // Answerを受信したので既存の接続でAnswer処理
+                            if let Some(ref connection) = self.state.rtc_connection {
+                                let connection_clone = connection.clone();
+                                let answer_sdp = sdp_data.clone();
+
+                                spawn_local(async move {
+                                    let mut conn = connection_clone;
+                                    match conn.recv_answer(answer_sdp).await {
+                                        Ok(_) => {
+                                            console::log!("✅ Answer processed successfully");
+                                        }
+                                        Err(e) => {
+                                            console::error!(&format!(
+                                                "❌ Failed to process answer: {:?}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                });
+                            } else {
+                                console::error!("❌ No RTC connection to process answer");
+                            }
+                        }
+                    }
+                } else {
+                    console::error!("❌ Failed to parse RTC signal data");
+                    ctx.link()
+                        .send_message(Msg::ShowDialog("Invalid RTC signal format".to_string()));
+                }
+                true
+            }
+            Msg::RtcConnectionEstablished => {
+                console::log!(
+                    "📨 RtcConnectionEstablished message received - ICE connection ready"
+                );
+                self.state.rtc_connected = true;
+                self.state.rtc_dialog_visible = false;
+
+                // RTC接続確立時に自動でチャット画面を表示
+                self.state.chat_visible = true;
+
+                // 注意: 公開鍵交換はデータチャネルオープン時に自動開始される
+
+                true
+            }
+            Msg::SendPublicKeyViaRtc => {
+                console::log!("📨 SendPublicKeyViaRtc message received");
+
+                if let Some(ref my_keys) = self.state.my_keys {
+                    if let Some(ref connection) = self.state.rtc_connection {
+                        // RTC経由で公開鍵メッセージを送信
+                        let public_key_message = RtcMessage::PublicKey {
+                            public_key: my_keys.public_key.clone(),
+                        };
+
+                        console::log!("🔑 Sending public key via RTC");
+
+                        let _connection_clone = connection.clone();
+                        let ctx_link = ctx.link().clone();
+                        let my_public_key = my_keys.public_key.clone();
+
+                        spawn_local(async move {
+                            let mut conn = _connection_clone;
+
+                            // データハンドラを設定して受信メッセージを処理
+                            let ctx_link_clone = ctx_link.clone();
+                            let my_key_clone = my_public_key.clone();
+                            if let Err(e) = conn.set_data_handler(move |data| {
+                                console::log!(&format!("📨 Received RTC data: {}", data));
+
+                                if let Ok(message) = serde_json::from_str::<RtcMessage>(&data) {
+                                    match message {
+                                        RtcMessage::PublicKey { public_key } => {
+                                            console::log!("🔑 Received peer public key");
+                                            ctx_link_clone.send_message(Msg::SetPeerPublicKey(
+                                                public_key.clone(),
+                                            ));
+                                        }
+                                        RtcMessage::EncryptedData { encrypted_data } => {
+                                            console::log!(
+                                                "🔓 Received encrypted data (chat message)"
+                                            );
+                                            // Decrypt received message before adding to chat
+                                            ctx_link_clone.send_message(
+                                                Msg::DecryptReceivedMessage(encrypted_data),
+                                            );
+                                        }
+                                    }
+                                }
+                            }) {
+                                console::error!(&format!("❌ Failed to set data handler: {:?}", e));
+                            }
+
+                            // データチャネルの状態を確認してからメッセージを送信
+                            console::log!("⏳ Attempting to send public key via RTC...");
+                            match conn.send_message(&public_key_message) {
+                                Ok(_) => {
+                                    console::log!("✅ Public key sent successfully");
+                                }
+                                Err(e) => {
+                                    console::error!(&format!(
+                                        "❌ Failed to send public key: {:?}",
+                                        e
+                                    ));
+                                    ctx_link.send_message(Msg::ShowDialog(format!(
+                                         "Failed to send public key: {}. Please try again after the connection is fully established.",
+                                         e.as_string().unwrap_or_else(|| "Unknown error".to_string())
+                                     )));
+                                }
+                            }
+                        });
+                    } else {
+                        console::error!("❌ No RTC connection available");
+                        ctx.link().send_message(Msg::ShowDialog(
+                            "No RTC connection available".to_string(),
+                        ));
+                    }
+                } else {
+                    ctx.link().send_message(Msg::ShowDialog(
+                        "No public key available to send".to_string(),
+                    ));
+                }
+                true
+            }
+            Msg::ShowChatView => {
+                self.state.chat_visible = true;
+                true
+            }
+            Msg::HideChatView => {
+                self.state.chat_visible = false;
+                true
+            }
+            Msg::SendChatMessage(message) => {
+                console::log!("📨 SendChatMessage:", &message);
+                if let Some(ref connection) = self.state.rtc_connection {
+                    if let Some(ref peer_public_key) = self.state.rtc_peer_public_key {
+                        // メッセージを暗号化してから送信
+                        if let Some(ref worker) = self.state.worker {
+                            let worker_clone = worker.clone();
+                            let message_clone = message.clone();
+                            let peer_key_clone = peer_public_key.clone();
+                            let _connection_clone = connection.clone();
+                            let ctx_link = ctx.link().clone();
+
+                            spawn_local(async move {
+                                let encrypt_message = MainMessage::Encrypt {
+                                    public_key: peer_key_clone,
+                                    data: message_clone.clone(),
+                                };
+
+                                if let Ok(js_message) =
+                                    serde_wasm_bindgen::to_value(&encrypt_message)
+                                {
+                                    worker_clone.post_message(&js_message).unwrap_or_else(|e| {
+                                        console::error!(&format!(
+                                            "❌ Failed to post encrypt message: {:?}",
+                                            e
+                                        ));
+                                    });
+                                }
+
+                                // 送信済みメッセージをチャットに追加（暗号化前の平文で表示）
+                                ctx_link.send_message(Msg::AddChatMessage(message_clone, true));
+                            });
+                        }
+                        self.state.chat_input.clear();
+                    } else {
+                        console::error!("❌ No peer public key available for encryption");
+                        ctx.link().send_message(Msg::ShowDialog("Peer public key not available. Please ensure the connection is fully established.".to_string()));
+                    }
+                }
+                true
+            }
+            Msg::UpdateChatInput(input) => {
+                self.state.chat_input = input;
+                true
+            }
+            Msg::AddChatMessage(content, is_sent) => {
+                let timestamp = Date::now();
+                let message = ChatMessage {
+                    content,
+                    is_sent,
+                    timestamp,
+                };
+                self.state.chat_messages.push(message);
+
+                // Auto-scroll to bottom after adding message
+                spawn_local(async move {
+                    if let Some(window) = window() {
+                        if let Some(document) = window.document() {
+                            if let Some(messages_container) =
+                                document.get_element_by_id("chat-messages")
+                            {
+                                let messages_element: HtmlElement =
+                                    messages_container.unchecked_into();
+                                messages_element.set_scroll_top(messages_element.scroll_height());
+                            }
+                        }
+                    }
+                });
+
+                true
+            }
+            Msg::SetPeerPublicKey(public_key) => {
+                self.state.rtc_peer_public_key = Some(public_key);
+                true
+            }
+            Msg::DecryptReceivedMessage(encrypted_data) => {
+                console::log!("🔓 Decrypting received message");
+                if let Some(ref my_keys) = self.state.my_keys {
+                    if let Some(ref worker) = self.state.worker {
+                        let worker_clone = worker.clone();
+                        let private_key = my_keys.private_key.clone();
+
+                        spawn_local(async move {
+                            let decrypt_message = MainMessage::Decrypt {
+                                private_key,
+                                data: encrypted_data,
+                            };
+
+                            if let Ok(js_message) = serde_wasm_bindgen::to_value(&decrypt_message) {
+                                worker_clone.post_message(&js_message).unwrap_or_else(|e| {
+                                    console::error!(&format!(
+                                        "❌ Failed to post decrypt message: {:?}",
+                                        e
+                                    ));
+                                });
+                            }
+                        });
+                    }
+                }
+                true
+            }
+            Msg::SendEncryptedChatMessage(encrypted_data) => {
+                console::log!("📨 Sending encrypted chat message");
+                if let Some(ref connection) = self.state.rtc_connection {
+                    let rtc_message = RtcMessage::EncryptedData { encrypted_data };
+                    let mut conn = connection.clone();
+                    match conn.send_message(&rtc_message) {
+                        Ok(_) => {
+                            console::log!("✅ Encrypted chat message sent successfully");
+                        }
+                        Err(e) => {
+                            console::error!(&format!(
+                                "❌ Failed to send encrypted chat message: {:?}",
+                                e
+                            ));
+                        }
+                    }
+                }
+                true
+            }
+            Msg::ClearChatHistory => {
+                self.state.chat_messages.clear();
+                true
+            }
         }
     }
 
@@ -667,10 +1126,16 @@ impl Component for App {
 
                 if self.state.is_loading {
                     { self.render_loading_screen() }
+                } else if self.state.chat_visible {
+                    { self.render_chat_view(ctx) }
                 } else if let Some(ref _keys) = self.state.my_keys {
                     { self.render_main_view(ctx) }
                 } else {
                     { self.render_loading_view() }
+                }
+
+                if self.state.rtc_dialog_visible && !self.state.is_loading {
+                    { self.render_rtc_dialog(ctx) }
                 }
 
                 if self.state.qr_reader_visible && !self.state.is_loading {
@@ -720,8 +1185,7 @@ impl Component for App {
 }
 
 impl App {
-    fn initialize_app(&mut self, ctx: &Context<Self>) {
-        console::log!("🔧 Application initialization started");
+    fn setup_worker(&mut self, ctx: &Context<Self>) -> Option<Worker> {
         let link = ctx.link().clone();
 
         // ワーカー初期化のエラーハンドリングを改善
@@ -729,7 +1193,7 @@ impl App {
             Ok(worker) => worker,
             Err(e) => {
                 error_report(&format!("❌ Failed to create worker: {:?}", e));
-                return;
+                return None;
             }
         };
 
@@ -813,7 +1277,7 @@ impl App {
                 }
                 Ok(WorkerMessage::Encrypted { encrypted_data }) => {
                     console::log!("✅ Encryption successful");
-                    dispatch_custom_event("show_encrypted_qr", &encrypted_data);
+                    dispatch_custom_event("encrypted_message_ready", &encrypted_data);
                 }
                 Ok(WorkerMessage::Decrypted { decrypted_data }) => {
                     console::log!("✅ Decryption successful");
@@ -822,7 +1286,7 @@ impl App {
                         console::log!("🔑 Private key detected in decrypted data");
                         link.send_message(Msg::ShowPrivateKeyImportConfirm(decrypted_data));
                     } else {
-                        dispatch_custom_event("show_dialog", &decrypted_data);
+                        dispatch_custom_event("decrypted_message_ready", &decrypted_data);
                     }
                 }
                 Ok(WorkerMessage::PrivateKeyExported {
@@ -859,7 +1323,14 @@ impl App {
         }) as Box<dyn FnMut(_)>);
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         onmessage.forget();
-        self.state.worker = Some(worker);
+        Some(worker)
+    }
+
+    fn initialize_app(&mut self, ctx: &Context<Self>) {
+        console::log!("🔧 Application initialization started");
+        if let Some(worker) = self.setup_worker(ctx) {
+            self.state.worker = Some(worker);
+        }
     }
 
     fn generate_new_keys(&mut self, ctx: &Context<Self>) {
@@ -874,7 +1345,7 @@ impl App {
         if let Some(worker) = self.state.worker.clone() {
             spawn_local(async move {
                 link.send_message(Msg::UpdateLoadingProgress(
-                    "Generating RSA key pair...".to_string(),
+                    "Generating X25519 key pair...".to_string(),
                     Some(50),
                 ));
 
@@ -987,7 +1458,7 @@ impl App {
 
                     <div class="loading-tips">
                         <p>{"When you start the application for the first time, it takes a little time to generate the encryption key."}</p>
-                        <p>{"For security reasons, a 2048-bit RSA key is generated."}</p>
+                        <p>{"For security reasons, a X25519 key is generated."}</p>
                     </div>
                 </div>
             </div>
@@ -1033,6 +1504,9 @@ impl App {
                     </button>
                     <button onclick={on_message_send_click} class="send-message-btn" style="margin-left: 10px; background-color: #27ae60;">
                         {"Send message"}
+                    </button>
+                    <button onclick={ctx.link().callback(|_| Msg::ShowRtcDialog)} class="rtc-connect-btn" style="margin-left: 10px; background-color: #9b59b6;">
+                        {"Establish connection"}
                     </button>
                 </div>
 
@@ -1434,6 +1908,166 @@ impl App {
             </div>
         }
     }
+
+    fn render_rtc_dialog(&self, ctx: &Context<Self>) -> Html {
+        let on_close = ctx.link().callback(|_| Msg::HideRtcDialog);
+        let on_generate_offer = ctx.link().callback(|_| Msg::StartRtcConnection);
+
+        html! {
+            <div class="dialog-overlay">
+                <div class="dialog" style="max-width: 500px;">
+                    <h3>{"WebRTC Connection Setup"}</h3>
+                    <p style="margin: 15px 0;">
+                        {"Start a secure peer-to-peer connection:"}
+                    </p>
+
+                    <div style="margin: 20px 0;">
+                        <button onclick={on_generate_offer} style="background-color: #3498db; padding: 15px; font-size: 16px; width: 100%;">
+                            {"Create Offer & Generate QR Code"}
+                        </button>
+                    </div>
+
+                    <div style="margin: 20px 0;">
+                        <h4>{"How it works:"}</h4>
+                        <ol style="text-align: left; font-size: 14px; color: #666; padding-left: 20px;">
+                            <li>{"Click \"Create Offer\" to generate a QR code"}</li>
+                            <li>{"Share the QR code with the other party"}</li>
+                            <li>{"They scan it and generate an answer QR code"}</li>
+                            <li>{"Scan their answer QR code to complete the connection"}</li>
+                            <li>{"Public keys will be exchanged automatically"}</li>
+                        </ol>
+                    </div>
+
+                    if self.state.rtc_connected {
+                        <div style="margin: 20px 0; padding: 15px; background-color: #d4edda; border-radius: 5px;">
+                            <p style="color: #155724; margin: 0; font-weight: bold;">
+                                {"✅ RTC Connection Established!"}
+                            </p>
+                            if let Some(ref peer_key) = self.state.rtc_peer_public_key {
+                                <p style="color: #155724; margin: 5px 0 0 0; font-size: 12px;">
+                                    {format!("Peer public key: {}...", &peer_key[..20])}
+                                </p>
+                            }
+                        </div>
+                    }
+
+                    <div style="display: flex; justify-content: space-between; gap: 10px; margin-top: 20px;">
+                        <button onclick={on_close} style="background-color: #95a5a6; flex: 1;">{"Close"}</button>
+                        if self.state.rtc_connected {
+                            <button onclick={ctx.link().callback(|_| Msg::SendPublicKeyViaRtc)} style="background-color: #e67e22; flex: 1;">
+                                {"Send My Public Key"}
+                            </button>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    fn render_chat_view(&self, ctx: &Context<Self>) -> Html {
+        let on_input = ctx.link().callback(|e: web_sys::InputEvent| {
+            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+            Msg::UpdateChatInput(input.value())
+        });
+
+        let on_send = {
+            let message = self.state.chat_input.clone();
+            ctx.link().callback(move |_| {
+                if !message.trim().is_empty() {
+                    Msg::SendChatMessage(message.clone())
+                } else {
+                    Msg::UpdateChatInput(String::new())
+                }
+            })
+        };
+
+        let on_keydown = {
+            let message = self.state.chat_input.clone();
+            ctx.link().callback(move |e: web_sys::KeyboardEvent| {
+                if e.key() == "Enter" && !message.trim().is_empty() {
+                    Msg::SendChatMessage(message.clone())
+                } else {
+                    Msg::UpdateChatInput(message.clone()) // No-op to avoid changing state unnecessarily
+                }
+            })
+        };
+
+        let on_back = ctx.link().callback(|_| Msg::HideChatView);
+
+        html! {
+            <div class="chat-container" style="max-width: 800px; margin: 0 auto; padding: 20px;">
+                <div class="chat-header" style="display: flex; align-items: center; padding: 10px 0; border-bottom: 1px solid #ddd; margin-bottom: 20px;">
+                    <button onclick={on_back} style="background-color: #95a5a6; margin-right: 15px; padding: 8px 15px;">
+                        {"← Back"}
+                    </button>
+                    <h2 style="margin: 0; flex: 1;">{"Chat"}</h2>
+                    <button onclick={ctx.link().callback(|_| Msg::ClearChatHistory)} style="background-color: #e74c3c; color: white; margin-right: 15px; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer;">
+                        {"🗑️ Clear"}
+                    </button>
+                    <span style="color: #27ae60; font-weight: bold;">{"🔒"}</span>
+                </div>
+
+                <div id="chat-messages" class="chat-messages" style="min-height: 400px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 15px; margin-bottom: 20px; background-color: #f9f9f9;">
+                    {
+                        if self.state.chat_messages.is_empty() {
+                            html! {
+                                <p style="text-align: center; color: #666; font-style: italic;">
+                                    {"Your messages are end-to-end encrypted via WebRTC"}
+                                </p>
+                            }
+                        } else {
+                            html! {
+                                <>
+                                    {
+                                        self.state.chat_messages.iter().map(|msg| {
+                                            let (message_style, alignment) = if msg.is_sent {
+                                                ("background-color: #3498db; color: white; margin-left: auto; margin-right: 0;", "flex-end")
+                                            } else {
+                                                ("background-color: #ecf0f1; color: #2c3e50; margin-left: 0; margin-right: auto;", "flex-start")
+                                            };
+
+                                            html! {
+                                                <div style={format!("display: flex; justify-content: {}; margin-bottom: 10px;", alignment)}>
+                                                    <div style={format!("max-width: 70%; padding: 8px 12px; border-radius: 18px; word-wrap: break-word; {}", message_style)}>
+                                                        {&msg.content}
+                                                    </div>
+                                                </div>
+                                            }
+                                        }).collect::<Html>()
+                                    }
+                                </>
+                            }
+                        }
+                    }
+                </div>
+
+                <div class="chat-input" style="display: flex; gap: 10px;">
+                    <input
+                        type="text"
+                        placeholder="Type your message..."
+                        value={self.state.chat_input.clone()}
+                        oninput={on_input}
+                        onkeydown={on_keydown}
+                        style="flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 5px; font-size: 16px;"
+                    />
+                    <button
+                        onclick={on_send}
+                        disabled={self.state.chat_input.trim().is_empty()}
+                        style="padding: 12px 20px; background-color: #3498db; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer;"
+                    >
+                        {"Send"}
+                    </button>
+                </div>
+
+                if let Some(ref peer_key) = self.state.rtc_peer_public_key {
+                    <div style="margin-top: 15px; padding: 10px; background-color: #d4edda; border-radius: 5px; font-size: 12px;">
+                        <strong>{"Connected to: "}</strong>
+                        <span style="font-family: monospace;">{format!("{}...", &peer_key[..20])}</span>
+                    </div>
+                }
+            </div>
+        }
+    }
 }
 
 fn setup_custom_event_listener(link: yew::html::Scope<App>) {
@@ -1811,7 +2445,11 @@ pub fn process_qr_data(data: &str) {
         &data[..data.len().min(50)]
     ));
 
-    if is_valid_age_public_key(data) {
+    // RTC信号データかチェック
+    if let Ok(_signal_data) = serde_json::from_str::<RtcSignalData>(data) {
+        console::log!("📡 RTC signal data recognized");
+        dispatch_custom_event("process_rtc_signal", data);
+    } else if is_valid_age_public_key(data) {
         console::log!("🔑 Age public key recognized");
         dispatch_custom_event("add_contact", &data);
     } else if is_private_key_data(data) {
@@ -1849,6 +2487,27 @@ fn is_base64(s: &str) -> bool {
         Ok(_) => true,
         Err(_) => false,
     }
+}
+
+async fn copy_to_clipboard(text: &str) -> Result<(), JsValue> {
+    use js_sys::Promise;
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{window, Clipboard};
+
+    let window = window().ok_or("No window object")?;
+    let navigator = window.navigator();
+
+    // Clipboard APIが利用可能かチェック
+    let clipboard = js_sys::Reflect::get(&navigator, &"clipboard".into())?;
+    if clipboard.is_undefined() {
+        return Err(JsValue::from_str("Clipboard API not available"));
+    }
+
+    let clipboard: Clipboard = clipboard.unchecked_into();
+    let promise: Promise = clipboard.write_text(text);
+
+    JsFuture::from(promise).await?;
+    Ok(())
 }
 
 #[wasm_bindgen(start)]
